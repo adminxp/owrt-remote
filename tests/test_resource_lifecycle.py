@@ -306,6 +306,25 @@ class OtherResourceTests(unittest.TestCase):
         self.assertIn("push_test: false", hub.service_worker_js())
         self.assertIn('if not bool(payload.get("push_test", True))', SOURCE.read_text(encoding="utf-8"))
 
+    def test_router_cards_hide_traffic_and_keep_wol_devices_readable(self):
+        page = hub.dashboard_html([], "test-owner", auth_bootstrap={"is_owner": True})
+        self.assertNotIn("Клиенты Traffic", page)
+        self.assertNotIn("data-traffic-toggle", page)
+        self.assertIn(".wolPickerList{display:grid;grid-template-columns:minmax(0,1fr)", page)
+        self.assertIn("grid-auto-rows:max-content", page)
+        self.assertIn("overflow-x:hidden", page)
+        self.assertIn("overflow-wrap:anywhere", page)
+        self.assertIn('data-wol-picker-list="${{escapeAttr(router.id)}}"', SOURCE.read_text(encoding="utf-8"))
+        self.assertIn("hasOpenWolPanel()", page)
+        self.assertIn("loadRouters({automatic: true})", page)
+
+    def test_vps_terminal_contains_sqlite_fd_leak_command(self):
+        quick = hub.vps_quick_commands_html("193.233.82.38")
+        self.assertIn("Сделать тест на утечку соединений SQLite панели Hub.", quick)
+        self.assertIn("PID=$(pgrep -f &#x27;/opt/owrt-remote/owrt-remote-hub.py&#x27; | head -1)", quick)
+        self.assertIn("HUBDB=$(ls -l /proc/$PID/fd", quick)
+        self.assertIn("sleep 10", quick)
+
     def test_atomic_failure_removes_temp_and_preserves_target(self):
         with tempfile.TemporaryDirectory(dir=STATE.name) as name:
             target = Path(name) / "original.txt"

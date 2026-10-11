@@ -4603,6 +4603,11 @@ def vps_terminal_commands(host):
             "note": "install-vps.sh из репо",
             "command": f'curl -fsSL "{RAW_REPO_BASE}/vps/install-vps.sh?v=$(date +%s)" | sh',
         },
+        {
+            "title": "Сделать тест на утечку соединений SQLite панели Hub.",
+            "note": "60 замеров FD, открытого hub.db и загрузки CPU каждые 10 секунд",
+            "command": "PID=$(pgrep -f '/opt/owrt-remote/owrt-remote-hub.py' | head -1)\n\nfor i in $(seq 1 60); do\n   echo \"$(date '+%H:%M:%S') FD=$(ls /proc/$PID/fd 2>/dev/null | wc -l) HUBDB=$(ls -l /proc/$PID/fd 2>/dev/null | grep '/var/lib/owrt-remote/hub.db' | wc -l) CPU=$(ps -p $PID -o %cpu= | xargs)\"\n   sleep 10\ndone",
+        },
     ]
 
 
@@ -4818,7 +4823,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
 .metrics{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}}.metric{{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.055);padding:9px}}.metric.span2{{grid-column:span 2}}.metric.temp-ok strong,.metric.flash-ok strong,.metric.memory-ok strong{{color:#bbf7d0}}.metric.temp-warn strong,.metric.flash-warn strong,.metric.memory-warn strong{{color:#fde68a}}.metric.temp-bad strong,.metric.flash-bad strong,.metric.memory-bad strong{{color:#fecdd3}}.metric>span{{display:block;width:100%;color:var(--muted);font-size:11px;text-align:center}}.metric strong{{display:block;width:100%;margin-top:2px;font-size:14px;word-break:break-word;text-align:center}}.metric.metric-compact strong{{font-size:14px;line-height:1.3;white-space:pre-line;word-break:normal}}.metric.temp-unavailable strong{{font-size:14px;line-height:1.3;white-space:pre-line;word-break:normal;color:#f3e8ff}}.metric.model-metric strong{{margin-top:5px}}.modelMetricValue{{position:relative;display:flex;align-items:center;justify-content:center;width:100%;max-width:100%}}.modelLegendSpacer{{display:none}}.modelMetricName{{display:block;max-width:calc(100% - 72px);min-width:0;color:#ffffff;font-size:14px;line-height:1.2;text-align:center;white-space:nowrap}}.modelLegendBadge{{position:absolute;right:0;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;justify-content:center;min-height:20px;min-width:62px;padding:0 8px;border:1px solid rgba(34,211,238,.38);border-radius:999px;background:linear-gradient(120deg,rgba(34,211,238,.24),rgba(59,130,246,.16),rgba(168,85,247,.14));color:#e0f7ff;font-size:8px;font-weight:900;line-height:1;letter-spacing:.10em;text-transform:uppercase;box-shadow:0 8px 18px rgba(34,211,238,.14),inset 0 1px 0 rgba(255,255,255,.12);overflow:hidden;white-space:nowrap}}.modelLegendBadge::before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);transform:translateX(-120%);animation:bannerShine 6.2s ease-in-out infinite}}.modelLegendBadge span{{position:relative;display:block}}.actionToggle{{display:none}}.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}}.notesPreview{{margin-top:10px;padding:10px 12px;border:1px solid rgba(34,211,238,.16);border-radius:10px;background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03)),rgba(18,14,30,.62);color:#ddd6fe;font-size:12px;line-height:1.45}}.notesPreview strong{{color:#f5f3ff}}.notesPreview span{{color:#c4b5fd}}.wolPanel,.trafficPanel{{display:grid;gap:10px;margin-top:12px;padding:12px;border:1px solid rgba(34,211,238,.20);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.045)),rgba(18,14,30,.82);text-align:left}}.notesPanel{{gap:12px}}.notesEditor{{display:grid;gap:8px}}.notesArea{{width:100%;min-height:128px;padding:12px 13px;border:1px solid rgba(34,211,238,.24);border-radius:10px;background:linear-gradient(180deg,rgba(52,38,74,.96),rgba(34,26,52,.96));color:#f5f3ff;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.04);resize:vertical;font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}}.notesArea:focus{{border-color:rgba(34,211,238,.60);box-shadow:0 0 0 3px rgba(34,211,238,.12),inset 0 1px 0 rgba(255,255,255,.05)}}.notesArea[readonly]{{opacity:.88;cursor:default}}.notesMeta{{display:flex;align-items:center;justify-content:space-between;gap:10px;color:#c4b5fd;font-size:12px;line-height:1.35}}.notesMeta.bad{{color:#fecdd3}}.notesMeta.ok{{color:#bbf7d0}}.notesMeta span:last-child{{white-space:nowrap}}.notesActions{{display:flex;gap:8px;flex-wrap:wrap}}.trafficPanel{{gap:12px}}.wolPanel[hidden],.trafficPanel[hidden]{{display:none!important}}.wolHeader{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.wolTitle{{margin:0;color:#f3e8ff;font-size:13px;font-weight:900}}.wolMeta{{min-height:16px;color:#c4b5fd;font-size:12px;line-height:1.35}}.wolMeta.bad{{color:#fecdd3}}.wolControls,.trafficControls{{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.95fr) auto;gap:8px;align-items:end}}.wolField{{display:grid;gap:6px;min-width:0;color:#ddd6fe;font-size:11px;font-weight:850}}.wolField select,.wolField input{{width:100%;min-width:0;min-height:38px;padding:0 12px;border:1px solid rgba(34,211,238,.24);border-radius:10px;background:linear-gradient(180deg,rgba(52,38,74,.96),rgba(34,26,52,.96));color:#f5f3ff;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}}.wolField select option{{background:#221a34;color:#f5f3ff}}.wolField select option:checked{{background:#3b82f6;color:#ffffff}}.wolField select:focus,.wolField input:focus{{border-color:rgba(34,211,238,.60);box-shadow:0 0 0 3px rgba(34,211,238,.12),inset 0 1px 0 rgba(255,255,255,.05)}}.wolField input::placeholder{{color:rgba(221,214,254,.52)}}.wolControls .btn,.wolControls button,.trafficControls .btn,.trafficControls button{{min-height:38px}}.trafficSummary{{display:flex;flex-wrap:wrap;gap:6px}}.trafficSummaryChip{{display:inline-flex;align-items:center;min-height:24px;padding:0 9px;border:1px solid rgba(167,139,250,.20);border-radius:999px;background:rgba(255,255,255,.05);color:#ddd6fe;font-size:10px;font-weight:850;letter-spacing:.03em;text-transform:uppercase}}.trafficSummaryChip.accent{{border-color:rgba(34,211,238,.34);background:rgba(34,211,238,.12);color:#cffafe}}.trafficSummaryChip.muted{{border-color:rgba(245,158,11,.24);background:rgba(245,158,11,.10);color:#fde68a}}.trafficViewport{{max-height:min(46vh,420px);overflow:auto;padding:8px 4px 0 0;border-top:1px solid rgba(167,139,250,.14);scrollbar-width:thin;overscroll-behavior:contain}}.trafficViewport::-webkit-scrollbar{{width:8px}}.trafficViewport::-webkit-scrollbar-thumb{{background:rgba(167,139,250,.24);border-radius:999px}}.trafficViewport::-webkit-scrollbar-track{{background:transparent}}.trafficList{{display:grid;gap:7px}}.trafficRow{{display:grid;gap:7px;padding:10px;border:1px solid rgba(167,139,250,.16);border-radius:10px;background:linear-gradient(180deg,rgba(57,43,82,.45),rgba(33,26,48,.70));box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}}.trafficRowTop{{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px}}.trafficIdentity{{min-width:0}}.trafficName{{margin:0;color:#f5f3ff;font-size:13px;font-weight:900;line-height:1.35}}.trafficMetaLine{{margin:3px 0 0;color:#c4b5fd;font-size:10.5px;line-height:1.4;word-break:break-word}}.trafficTotalBadge{{display:grid;gap:2px;min-width:84px;padding:7px 9px;border:1px solid rgba(34,211,238,.22);border-radius:10px;background:linear-gradient(180deg,rgba(34,211,238,.12),rgba(34,211,238,.04));text-align:right}}.trafficTotalBadge span{{color:#a5f3fc;font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}}.trafficTotalBadge strong{{color:#ecfeff;font-size:12px;line-height:1.25;word-break:break-word}}.trafficTagRow{{display:flex;flex-wrap:wrap;gap:5px}}.trafficTag{{display:inline-flex;align-items:center;min-height:20px;padding:0 7px;border:1px solid rgba(34,211,238,.24);border-radius:999px;background:rgba(34,211,238,.10);color:#cffafe;font-size:9px;font-weight:850;letter-spacing:.03em;text-transform:uppercase}}.trafficStats{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}}.trafficStat{{display:grid;gap:2px;padding:7px 8px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:rgba(255,255,255,.04);text-align:center}}.trafficStat span{{color:#c4b5fd;font-size:9px;font-weight:800;letter-spacing:.02em;text-transform:uppercase}}.trafficStat strong{{color:#f5f3ff;font-size:11px;line-height:1.35;word-break:break-word}}.trafficStatTotal{{display:none}}.empty{{grid-column:1/-1;border:1px dashed var(--line);border-radius:8px;padding:30px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.045)),var(--panel);text-align:center;color:var(--muted)}}.hint{{margin-top:16px;padding:13px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.045)),var(--panel);color:var(--muted)}}.diagnosticPanel{{margin:16px 0 4px;padding:14px;border:1px solid rgba(34,211,238,.22);border-radius:8px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.045)),var(--panel);box-shadow:0 18px 46px rgba(0,0,0,.20);text-align:center}}.diagnosticPanel[hidden]{{display:none!important}}.diagnosticTop{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:flex-start}}.diagnosticTop>div{{grid-column:2;text-align:center}}.diagnosticTop .btn{{grid-column:3;justify-self:end;align-self:start;width:auto;min-width:118px;max-width:none;padding-left:18px;padding-right:18px}}.diagnosticTop h2{{margin:0;font-size:18px}}.diagnosticLead{{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.4}}.diagnosticGrid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}}.diagnosticGrid label{{display:grid;gap:6px;color:#ddd6fe;font-size:12px;font-weight:850;text-align:center}}.diagnosticGrid textarea{{min-height:92px;resize:vertical;border:1px solid rgba(167,139,250,.24);border-radius:10px;padding:12px 13px;background:linear-gradient(180deg,rgba(52,38,74,.96),rgba(34,26,52,.96));color:#f5f3ff;box-shadow:inset 0 1px 0 rgba(255,255,255,.04);outline:none;text-align:left}}.diagnosticGrid textarea::placeholder{{color:rgba(221,214,254,.42)}}.diagnosticGrid textarea:focus{{border-color:rgba(34,211,238,.62);box-shadow:0 0 0 3px rgba(34,211,238,.12),inset 0 1px 0 rgba(255,255,255,.05)}}.diagnosticActions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;justify-content:center}}.diagSummary{{margin-top:12px;padding:10px 12px;border-radius:8px;font-weight:850}}.diagSummary.good{{border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.12);color:#bbf7d0}}.diagSummary.warn{{border:1px solid rgba(245,158,11,.34);background:rgba(245,158,11,.10);color:#fde68a}}.diagSummary.bad{{border:1px solid rgba(251,113,133,.38);background:rgba(251,113,133,.10);color:#fecdd3}}.diagList{{margin:0;padding-left:18px;color:#ddd6fe}}.diagList li{{margin:2px 0}}.diagBlocks{{display:grid;gap:8px;margin-top:10px;text-align:left}}.diagBlock{{border:1px solid rgba(167,139,250,.16);border-radius:8px;padding:10px;background:linear-gradient(180deg,rgba(57,43,82,.55),rgba(33,26,48,.74));box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}}.diagBlock strong{{display:block;margin-bottom:4px}}.diagBody{{display:grid;gap:8px}}.diagTextLine{{white-space:pre-line;line-height:1.45}}.diagCmdLine{{display:grid;gap:5px}}.diagCmdLabel{{line-height:1.4}}.diagCmdRow{{display:flex;align-items:center;gap:8px;min-width:0}}.diagCode{{flex:1;min-width:0;margin:0;padding:7px 11px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:rgba(0,0,0,.20);color:#c4b5fd;font:12px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:auto;scrollbar-width:thin}}.diagCopyBtn{{flex:0 0 36px;width:36px;height:36px;padding:0;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(255,255,255,.08);color:#f3e8ff;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .15s ease,background .15s ease,border-color .15s ease}}.diagCopyBtn:hover{{border-color:rgba(34,211,238,.52);background:rgba(34,211,238,.12)}}.diagCopyBtn:active{{transform:scale(.96)}}.diagCopyBtn.copied{{border-color:rgba(34,197,94,.42);background:rgba(34,197,94,.16);color:#bbf7d0}}.diagCopyBtn svg{{width:16px;height:16px;display:block}}.diagCopyBtn span{{position:absolute;left:-9999px}}.diagBlock.good strong{{color:#bbf7d0}}.diagBlock.warn strong{{color:#fde68a}}.diagBlock.bad strong{{color:#fecdd3}}code{{background:rgba(255,255,255,.10);border-radius:6px;padding:2px 5px;color:#f3e8ff}}
 .wolControls .btn[disabled],.wolControls button[disabled]{{opacity:.48;cursor:not-allowed;filter:saturate(.62)}}
 .trafficControls{{grid-template-columns:repeat(2,minmax(0,1fr))}}.trafficPasswordField{{grid-column:1}}.trafficStatusField{{grid-column:2}}.trafficActionBtn{{width:100%;min-width:0;padding:8px 8px;font-size:10px;letter-spacing:.01em;white-space:nowrap}}.trafficStatusField .wolMeta{{font-size:10px;line-height:1.22}}.trafficDangerBtn{{border-color:rgba(251,113,133,.34)!important;background:linear-gradient(180deg,rgba(251,113,133,.18),rgba(251,113,133,.08))!important;color:#ffe4e6!important}}.trafficDangerBtn:hover{{border-color:rgba(251,113,133,.54)!important;background:linear-gradient(180deg,rgba(251,113,133,.24),rgba(251,113,133,.12))!important}}
-.wolField input,.wolPickerToggle{{width:100%;min-width:0;min-height:38px;padding:0 12px;border:1px solid rgba(34,211,238,.24);border-radius:10px;background:linear-gradient(180deg,rgba(52,38,74,.96),rgba(34,26,52,.96));color:#f5f3ff;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}}.wolField input:focus,.wolPickerToggle:focus,.wolPickerToggle:focus-visible{{border-color:rgba(34,211,238,.60);box-shadow:0 0 0 3px rgba(34,211,238,.12),inset 0 1px 0 rgba(255,255,255,.05)}}.wolDeviceField{{grid-column:1/-1;width:100%}}.wolPickerToggle{{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;cursor:pointer;touch-action:manipulation}}.wolPickerToggle[disabled]{{opacity:.55;cursor:not-allowed}}.wolPickerValue{{display:grid;gap:2px;min-width:0;flex:1}}.wolPickerValue strong{{display:block;min-width:0;color:#f5f3ff;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.wolPickerValue small{{display:block;min-width:0;color:#c4b5fd;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.wolPickerChevron{{flex:0 0 auto;color:#c4b5fd;font-size:15px;line-height:1}}.wolPickerList{{display:grid;gap:8px;max-height:240px;overflow:auto;padding:8px;border:1px solid rgba(34,211,238,.24);border-radius:12px;background:rgba(17,12,29,.88);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}}.wolDeviceBtn{{width:100%;display:grid;gap:3px;padding:10px 12px;border:1px solid rgba(167,139,250,.18);border-radius:10px;background:rgba(255,255,255,.04);color:#f5f3ff;text-align:left;cursor:pointer;touch-action:manipulation;transition:border-color .15s ease,background .15s ease,transform .15s ease}}.wolDeviceBtn:hover,.wolDeviceBtn:focus-visible{{border-color:rgba(34,211,238,.48);background:rgba(34,211,238,.12)}}.wolDeviceBtn:active{{transform:scale(.99)}}.wolDeviceBtn.active{{border-color:rgba(59,130,246,.62);background:rgba(59,130,246,.18);box-shadow:0 0 0 1px rgba(59,130,246,.16)}}.wolDeviceName{{display:block;color:#f5f3ff;font-size:13px;font-weight:800;line-height:1.3}}.wolDeviceMeta{{display:block;color:#c4b5fd;font-size:11px;line-height:1.35;word-break:break-word}}.wolPickerEmpty{{padding:14px 12px;border:1px dashed rgba(167,139,250,.20);border-radius:10px;background:rgba(255,255,255,.03);color:#c4b5fd;text-align:center}}.metric.memory-ok strong,.metric.flash-ok strong,.metric.memory-warn strong,.metric.flash-warn strong,.metric.memory-bad strong,.metric.flash-bad strong{{color:#f3e8ff}}.metric.memory-ok .metric-accent,.metric.flash-ok .metric-accent{{color:#bbf7d0}}.metric.memory-warn .metric-accent,.metric.flash-warn .metric-accent{{color:#fde68a}}.metric.memory-bad .metric-accent,.metric.flash-bad .metric-accent{{color:#fecdd3}}.metric-line{{display:block}}.metric-accent{{font-weight:inherit}}
+.wolField input,.wolPickerToggle{{width:100%;min-width:0;min-height:38px;padding:0 12px;border:1px solid rgba(34,211,238,.24);border-radius:10px;background:linear-gradient(180deg,rgba(52,38,74,.96),rgba(34,26,52,.96));color:#f5f3ff;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}}.wolField input:focus,.wolPickerToggle:focus,.wolPickerToggle:focus-visible{{border-color:rgba(34,211,238,.60);box-shadow:0 0 0 3px rgba(34,211,238,.12),inset 0 1px 0 rgba(255,255,255,.05)}}.wolDeviceField{{grid-column:1/-1;width:100%}}.wolPickerToggle{{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;cursor:pointer;touch-action:manipulation}}.wolPickerToggle[disabled]{{opacity:.55;cursor:not-allowed}}.wolPickerValue{{display:grid;gap:2px;min-width:0;flex:1}}.wolPickerValue strong{{display:block;min-width:0;color:#f5f3ff;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.wolPickerValue small{{display:block;min-width:0;color:#c4b5fd;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.wolPickerChevron{{flex:0 0 auto;color:#c4b5fd;font-size:15px;line-height:1}}.wolPickerList{{display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:max-content;align-items:stretch;gap:8px;width:100%;max-height:min(44svh,360px);overflow-y:auto;overflow-x:hidden;padding:8px;border:1px solid rgba(34,211,238,.24);border-radius:12px;background:rgba(17,12,29,.88);box-shadow:inset 0 1px 0 rgba(255,255,255,.04);scrollbar-width:thin;scrollbar-gutter:stable both-edges;overscroll-behavior:contain}}.wolPickerList::-webkit-scrollbar{{width:8px}}.wolPickerList::-webkit-scrollbar-thumb{{background:rgba(167,139,250,.32);border-radius:999px}}.wolPickerList::-webkit-scrollbar-track{{background:transparent}}.wolDeviceBtn{{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:3px;width:100%;max-width:100%;min-width:0;min-height:58px;height:auto;padding:10px 12px;border:1px solid rgba(167,139,250,.18);border-radius:10px;background:rgba(255,255,255,.04);color:#f5f3ff;text-align:left;cursor:pointer;touch-action:manipulation;transition:border-color .15s ease,background .15s ease,transform .15s ease}}.wolDeviceBtn:hover,.wolDeviceBtn:focus-visible{{border-color:rgba(34,211,238,.48);background:rgba(34,211,238,.12)}}.wolDeviceBtn:active{{transform:scale(.99)}}.wolDeviceBtn.active{{border-color:rgba(59,130,246,.62);background:rgba(59,130,246,.18);box-shadow:0 0 0 1px rgba(59,130,246,.16)}}.wolDeviceName{{display:block;min-width:0;max-width:100%;color:#f5f3ff;font-size:13px;font-weight:800;line-height:1.3;white-space:normal;overflow-wrap:anywhere;word-break:break-word}}.wolDeviceMeta{{display:block;min-width:0;max-width:100%;color:#c4b5fd;font-size:11px;line-height:1.35;white-space:normal;overflow-wrap:anywhere;word-break:break-word}}.wolDeviceMeta:empty{{display:none}}.wolPickerEmpty{{padding:14px 12px;border:1px dashed rgba(167,139,250,.20);border-radius:10px;background:rgba(255,255,255,.03);color:#c4b5fd;text-align:center}}.metric.memory-ok strong,.metric.flash-ok strong,.metric.memory-warn strong,.metric.flash-warn strong,.metric.memory-bad strong,.metric.flash-bad strong{{color:#f3e8ff}}.metric.memory-ok .metric-accent,.metric.flash-ok .metric-accent{{color:#bbf7d0}}.metric.memory-warn .metric-accent,.metric.flash-warn .metric-accent{{color:#fde68a}}.metric.memory-bad .metric-accent,.metric.flash-bad .metric-accent{{color:#fecdd3}}.metric-line{{display:block}}.metric-accent{{font-weight:inherit}}
 .seasonalFx{{position:fixed;inset:0;display:block;width:100vw;height:100vh;z-index:0;pointer-events:none;opacity:.9;mix-blend-mode:screen}}.desktopHeader{{--hdr-col-1:124px;--hdr-col-2:124px;--hdr-col-3:156px;--hdr-col-4:124px;--hdr-col-5:144px;--hdr-col-6:144px;--hdr-col-7:144px;--hdr-col-8:144px;--top-col-1:256px;--top-col-2:288px;--top-col-3:144px;display:grid;gap:8px;width:max-content;max-width:100%;margin-left:15px}}.desktopHeaderTop{{display:grid;grid-template-columns:var(--top-col-1) var(--top-col-2) var(--top-col-3);align-items:flex-start;gap:8px;width:max-content;max-width:100%;justify-self:start}}.desktopHeaderTop>.appBanner{{width:var(--top-col-1);min-width:var(--top-col-1);max-width:var(--top-col-1)}}.desktopHeaderTop>.routerSearchDock{{width:var(--top-col-2);min-width:var(--top-col-2);max-width:var(--top-col-2)}}.desktopHeaderTop>#seasonDock{{width:var(--top-col-3);min-width:var(--top-col-3);max-width:var(--top-col-3)}}.desktopHeaderBottom{{display:grid;grid-template-columns:var(--hdr-col-1) var(--hdr-col-2) var(--hdr-col-3) var(--hdr-col-4) var(--hdr-col-5) var(--hdr-col-6) var(--hdr-col-7) var(--hdr-col-8);gap:8px;width:max-content;max-width:100%;align-items:start;justify-self:start}}.desktopHeader .appBanner{{grid-column:auto;width:100%;min-width:0}}.desktopHeader .links{{display:grid;grid-column:1/span 3;grid-template-columns:var(--hdr-col-1) var(--hdr-col-2) var(--hdr-col-3);gap:8px;margin-top:0}}.desktopHeader .links a{{width:100%;min-width:0}}.routerSearchDock{{position:relative;display:block;grid-column:auto;width:100%;min-width:0;max-width:100%}}.mobileSearchDock{{display:none;width:100%;position:relative}}.routerSearchToggle{{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;width:100%;padding:8px 14px;border:1px solid rgba(34,211,238,.30);border-radius:999px;background:linear-gradient(110deg,rgba(34,211,238,.12),rgba(124,58,237,.22),rgba(236,72,153,.12));color:#f3e8ff;font-size:13px;font-weight:800;line-height:1;box-shadow:0 10px 24px rgba(124,58,237,.16),inset 0 1px 0 rgba(255,255,255,.10)}}.routerSearchToggle[data-active="true"],.routerSearchToggle[aria-expanded="true"]{{border-color:rgba(34,211,238,.52);box-shadow:0 14px 30px rgba(34,211,238,.14),inset 0 1px 0 rgba(255,255,255,.12)}}.routerSearchToggleIcon{{flex:0 0 auto;color:#c4b5fd;font-size:14px;line-height:1}}.mobileSearchVersion{{display:inline-flex;align-items:center;justify-content:center;min-height:20px;padding:0 7px;border:1px solid rgba(251,113,133,.34);border-radius:999px;background:rgba(251,113,133,.14);color:#fecdd3;font-size:10px;font-weight:900;line-height:1;letter-spacing:.04em;box-shadow:0 0 14px rgba(251,113,133,.14)}}.mobileSearchDock>.mobileSearchVersion{{display:flex;width:fit-content;margin:0 auto 6px}}#routerSearchToggle,#seasonToggle{{border:1px solid var(--line);background:rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.06);color:#f3e8ff}}#routerSearchToggle[data-active="true"],#routerSearchToggle[aria-expanded="true"],#seasonToggle[data-open="true"],#seasonToggle[aria-expanded="true"]{{border-color:var(--line);background:rgba(255,255,255,.11);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}}#routerSearchToggle .routerSearchToggleIcon,#seasonToggle .routerSearchToggleIcon{{color:#ddd6fe}}.routerSearchPanel{{position:absolute;top:calc(100% + 10px);left:0;z-index:55;width:min(296px,calc(100vw - 24px))}}.routerSearchPanel[hidden]{{display:none!important}}.routerSearchCard{{display:grid;grid-template-rows:auto auto auto;align-content:start;gap:8px;width:100%;min-height:82px;padding:12px;border:1px solid rgba(34,211,238,.26);border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.045)),rgba(19,14,32,.96);box-shadow:0 18px 42px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(10px)}}.routerSearchHead{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.routerSearchTitle{{display:block;color:#f3e8ff;font-size:12px;font-weight:900;line-height:1.1}}.routerSearchClear{{min-height:24px;padding:0 9px;border:1px solid rgba(167,139,250,.24);border-radius:999px;background:rgba(255,255,255,.06);color:#ddd6fe;font-size:11px;font-weight:850;cursor:pointer}}.routerSearchClear[disabled]{{opacity:.42;cursor:not-allowed}}.routerSearchField{{display:flex;align-items:center;gap:8px;min-height:38px;padding:0 12px;border:1px solid rgba(34,211,238,.26);border-radius:999px;background:linear-gradient(110deg,rgba(34,211,238,.08),rgba(124,58,237,.14),rgba(236,72,153,.08));box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}}.routerSearchField:focus-within{{border-color:rgba(34,211,238,.54);box-shadow:0 0 0 3px rgba(34,211,238,.10),inset 0 1px 0 rgba(255,255,255,.08)}}.routerSearchField input{{width:100%;padding:0;border:0;background:transparent;color:#f7f2ff;box-shadow:none;outline:none;font-size:13px;font-weight:700}}.routerSearchField input::placeholder{{color:#b9adc9}}.routerSearchIcon{{flex:0 0 auto;color:#c4b5fd;font-size:14px;line-height:1}}.routerSearchMeta{{min-height:14px;color:#c4b5fd;font-size:11px;font-weight:800;line-height:1.2}}.seasonDock{{display:grid;gap:6px;width:100%;padding:9px 10px;border:1px solid rgba(251,191,36,.18);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.035)),rgba(19,14,32,.90);box-shadow:0 12px 28px rgba(0,0,0,.18);backdrop-filter:blur(10px)}}.seasonLabel{{display:flex;align-items:center;justify-content:center;text-align:center;gap:8px;color:#fde68a;font-size:11px;font-weight:900;line-height:1.1;text-transform:uppercase;letter-spacing:.04em}}.seasonSwitch{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}}.seasonBtn{{min-height:30px;padding:6px 8px;border:1px solid rgba(251,191,36,.22);border-radius:999px;background:rgba(255,255,255,.06);color:#f7f2ff;font-size:11px;font-weight:850;line-height:1;cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease,box-shadow .15s ease,color .15s ease}}.seasonBtn:hover,.seasonBtn:focus-visible{{border-color:rgba(34,211,238,.50);background:rgba(34,211,238,.12);color:#ecfeff}}.seasonBtn[data-active="true"]{{border-color:rgba(251,191,36,.52);background:linear-gradient(110deg,rgba(251,191,36,.22),rgba(34,211,238,.10),rgba(168,85,247,.14));box-shadow:0 10px 20px rgba(251,191,36,.14),inset 0 1px 0 rgba(255,255,255,.08);color:#fff7cc}}.seasonBtn:active{{transform:scale(.98)}}#seasonDock{{position:relative;display:block;grid-column:auto;width:100%;min-width:0;max-width:none;padding:0;border:0;background:none;box-shadow:none;backdrop-filter:none;align-self:start}}.seasonToggle{{min-height:36px;padding:8px 12px;font-size:13px;line-height:1;white-space:normal;text-align:center}}.seasonToggleText{{display:block}}.seasonPanel{{position:absolute;top:calc(100% + 10px);left:0;z-index:56;width:min(320px,calc(100vw - 24px))}}.seasonPanel[hidden]{{display:none!important}}.seasonCard{{display:grid;gap:8px;width:100%;padding:12px;border:1px solid rgba(251,191,36,.18);border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.035)),rgba(19,14,32,.95);box-shadow:0 18px 42px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(12px)}}.headerActions{{display:grid;grid-column:4/span 5;grid-template-columns:var(--hdr-col-4) var(--hdr-col-5) var(--hdr-col-6) var(--hdr-col-7) var(--hdr-col-8);align-self:flex-start;justify-content:flex-start;align-content:flex-start;min-width:0;gap:8px;padding-top:0;max-width:none}}.card{{text-align:center}}.cardTop{{align-items:center;justify-content:center;flex-direction:column}}.tagRow,.actions{{justify-content:center}}.name{{display:inline-flex;align-items:center;justify-content:center;max-width:220px;min-height:34px;margin:0;padding:7px 10px;border:1px solid rgba(251,191,36,.48);border-radius:999px;background:linear-gradient(135deg,rgba(251,191,36,.32),rgba(245,158,11,.22),rgba(255,255,255,.07));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff;font-size:13px;line-height:1;font-weight:900;text-shadow:0 0 16px rgba(251,191,36,.42);box-shadow:0 10px 24px rgba(245,158,11,.10),inset 0 1px 0 rgba(255,255,255,.12)}}.metric{{text-align:center}}.metric.span2{{grid-column:1/-1}}
 @media(max-width:980px){{.cards,.routerGroupCards{{grid-template-columns:repeat(2,minmax(0,1fr))}}.toolbar{{grid-template-columns:1fr 1fr}}.card.main{{grid-column:span 1}}.top{{justify-items:stretch}}.desktopHeader,.desktopHeaderTop,.desktopHeaderBottom{{width:100%;max-width:none}}.desktopHeader{{--hdr-col-1:minmax(0,1fr);--hdr-col-2:minmax(0,1fr);--hdr-col-3:minmax(0,1.35fr);--hdr-col-4:minmax(0,1fr);--hdr-col-5:minmax(0,1fr);--hdr-col-6:minmax(0,1fr);--hdr-col-7:minmax(0,1fr);--hdr-col-8:minmax(0,1fr)}}.headerActions{{width:100%}}}}
 @media(max-width:680px){{body{{font-size:13px;background-attachment:scroll}}.wrap{{padding:10px}}.top{{gap:12px;padding:14px 0;align-items:flex-start}}.brand,.brand>div{{width:100%}}h1{{font-size:22px;line-height:1.18}}.appBanner{{width:auto;max-width:100%;justify-content:center;min-height:36px;padding:8px 12px}}.links,.headerActions,.summary,.mobileOwnerTools{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;gap:8px;max-width:none}}.links{{margin-top:10px}}.links a,.badge,.headerActions .btn,.mobileOwnerTools .btn,.mobileOwnerTools .badge,.miniStat{{width:100%;min-width:0;padding:9px 10px;font-size:12px}}.headerStack{{margin-top:0;width:100%;min-width:0}}.headerStack .badge{{width:100%;min-width:0}}.authMenu{{position:fixed;left:10px;right:10px;top:74px;width:auto;max-height:calc(100svh - 90px);overflow:auto}}.authMenuHead{{min-height:40px;padding:0 104px 8px 0}}.authMenu h2{{margin:2px 104px 0 0;line-height:1.2}}.authMenuClose{{display:inline-flex;top:0;right:0;min-height:32px;padding:6px 12px}}.cards,.routerGroupCards,.toolbar,.authGrid{{grid-template-columns:1fr}}.authRow{{grid-template-columns:1fr;gap:7px;padding:8px}}.authRowTitle{{font-size:13px}}.authRowMeta{{font-size:11px;line-height:1.3}}.authRouterFlags{{justify-content:flex-start;gap:6px}}.authFlagPill{{min-height:25px;padding:3px 7px;gap:5px}}.authFlagPill input{{width:12px;height:12px;flex-basis:12px}}.authFlagPill span{{font-size:10px}}.routerStats{{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-bottom:7px}}.statCard{{min-height:52px;padding:7px 6px}}.statCard span{{font-size:8px;letter-spacing:.015em}}.statCard strong{{font-size:20px}}.statCard em{{display:none}}.statCardHead{{min-height:16px}}.statValueRow,.offlineStatRow{{min-height:20px;margin-top:4px}}.offlineMoreBtn{{right:2px;min-height:16px;padding:0 5px;font-size:7px}}.offlinePopover{{right:3px;width:min(230px,calc(100vw - 20px));padding:8px}}.offlineItem{{padding:6px 7px}}.offlineName{{font-size:10px}}.toolbar{{padding:10px;margin:12px 0}}.card.main{{grid-column:span 1}}.card{{padding:12px;min-height:0}}.card>.metaLine,.card>.tagRow{{display:none}}.nameRow{{gap:6px;margin-top:10px}}.nameRow::before{{flex-basis:26px;width:26px;height:26px}}.name{{font-size:12px;max-width:190px}}.nameEditBtn{{flex-basis:26px;width:26px;height:26px}}.mobilePanelToggle,.routerFormToggle{{display:inline-flex}}.routerSearchDock{{width:100%}}.seasonDock{{width:100%}}#mobileSeasonDock{{width:100%;min-width:0;max-width:none;padding:0;border:0;background:none;box-shadow:none;backdrop-filter:none}}.routerSearchToggle,.seasonToggle{{width:100%}}.routerSearchPanel,.seasonPanel{{position:static;width:100%;margin-top:8px}}.routerSearchCard,.seasonCard{{width:100%;min-height:0;padding:10px 11px;border-radius:16px}}.routerSearchTitle{{font-size:11px}}.routerSearchField{{min-height:36px}}.routerSearchMeta{{text-align:center}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}}.metric{{padding:8px}}.diagnosticPanel{{padding:12px}}.diagnosticTop{{gap:8px}}.diagnosticTop h2{{font-size:17px}}.diagnosticLead{{font-size:11px}}.diagnosticGrid{{grid-template-columns:1fr;gap:10px}}.diagnosticGrid label{{font-size:13px}}.diagnosticGrid textarea{{min-height:118px;padding:12px 13px;font-size:15px;line-height:1.35}}.diagBlock{{padding:11px}}.actions{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.actions .btn,.actions button{{width:100%;min-width:0;padding:9px 8px;font-size:12px}}.wolControls,.trafficControls{{grid-template-columns:1fr}}.wolField span,.wolMeta{{text-align:center}}.wolControls .btn,.wolControls button,.trafficControls .btn,.trafficControls button{{width:100%}}.trafficSummary{{justify-content:center}}.trafficViewport{{max-height:360px;padding-right:0}}.trafficRowTop{{grid-template-columns:1fr}}.trafficTotalBadge{{min-width:0;text-align:left}}}}
@@ -5386,9 +5391,6 @@ const expandedGroupPickers = new Set();
 const diagnosticDrafts = new Map();
 const noteStateByRouter = new Map();
 const wolStateByRouter = new Map();
-const trafficStateByRouter = new Map();
-const trafficAutoRefreshTimers = new Map();
-const TRAFFIC_AUTO_REFRESH_MS = 4000;
 let pendingRouterViewRestore = 0;
 let pendingRouterRender = false;
 let pendingWolBlurFlush = 0;
@@ -5517,54 +5519,6 @@ function replaceRouterInList(router) {{
   syncRouterNotesState(window.ROUTERS);
 }}
 
-function clearTrafficAutoRefresh(routerId) {{
-  const key = String(routerId || '');
-  const timer = trafficAutoRefreshTimers.get(key);
-  if (timer) {{
-    clearTimeout(timer);
-    trafficAutoRefreshTimers.delete(key);
-  }}
-}}
-
-function clearAllTrafficAutoRefresh() {{
-  Array.from(trafficAutoRefreshTimers.keys()).forEach((routerId) => clearTrafficAutoRefresh(routerId));
-}}
-
-function shouldAutoRefreshTraffic(routerId) {{
-  const key = String(routerId || '');
-  const router = selectedRouter(key);
-  const state = getTrafficState(key);
-  if (!router || !state || !state.open) return false;
-  if (document.hidden) return false;
-  return true;
-}}
-
-function scheduleTrafficAutoRefresh(routerId, delay = TRAFFIC_AUTO_REFRESH_MS) {{
-  const key = String(routerId || '');
-  clearTrafficAutoRefresh(key);
-  if (!shouldAutoRefreshTraffic(key)) return;
-  trafficAutoRefreshTimers.set(key, window.setTimeout(async () => {{
-    trafficAutoRefreshTimers.delete(key);
-    if (!shouldAutoRefreshTraffic(key)) return;
-    await loadTrafficClients(key, true, {{silent: true}});
-    scheduleTrafficAutoRefresh(key, TRAFFIC_AUTO_REFRESH_MS);
-  }}, Math.max(1200, Number(delay) || TRAFFIC_AUTO_REFRESH_MS)));
-}}
-
-function syncTrafficAutoRefresh() {{
-  const activeIds = new Set();
-  for (const [routerId, state] of trafficStateByRouter.entries()) {{
-    const key = String(routerId || '');
-    if (state && state.open && shouldAutoRefreshTraffic(key)) {{
-      activeIds.add(key);
-      if (!trafficAutoRefreshTimers.has(key)) scheduleTrafficAutoRefresh(key, TRAFFIC_AUTO_REFRESH_MS);
-    }}
-  }}
-  Array.from(trafficAutoRefreshTimers.keys()).forEach((routerId) => {{
-    if (!activeIds.has(String(routerId || ''))) clearTrafficAutoRefresh(routerId);
-  }});
-}}
-
 function wolPasswordKey(routerId) {{
   return 'owrtRemote:sshPassword:' + String(routerId || '');
 }}
@@ -5645,25 +5599,6 @@ function getWolState(routerId) {{
   return wolStateByRouter.get(key);
 }}
 
-function getTrafficState(routerId) {{
-  const key = String(routerId || '');
-  if (!trafficStateByRouter.has(key)) {{
-    trafficStateByRouter.set(key, {{
-      open: false,
-      loaded: false,
-      loading: false,
-      error: '',
-      message: '',
-      sshPassword: loadWolPassword(key),
-      clients: [],
-      trafficSource: '',
-      trafficSupported: false,
-      flowHits: 0
-    }});
-  }}
-  return trafficStateByRouter.get(key);
-}}
-
 function setWolState(routerId, patch) {{
   const key = String(routerId || '');
   const current = getWolState(key);
@@ -5679,15 +5614,6 @@ function setWolState(routerId, patch) {{
   return next;
 }}
 
-function setTrafficState(routerId, patch) {{
-  const key = String(routerId || '');
-  const current = getTrafficState(key);
-  const next = Object.assign({{}}, current, patch || {{}});
-  next.clients = Array.isArray(next.clients) ? next.clients : [];
-  trafficStateByRouter.set(key, next);
-  return next;
-}}
-
 function hasOpenWolPicker() {{
   for (const state of wolStateByRouter.values()) {{
     if (state && state.open && state.pickerOpen) return true;
@@ -5695,9 +5621,16 @@ function hasOpenWolPicker() {{
   return false;
 }}
 
+function hasOpenWolPanel() {{
+  for (const state of wolStateByRouter.values()) {{
+    if (state && state.open) return true;
+  }}
+  return false;
+}}
+
 function activeWolInteractiveField() {{
   const active = document.activeElement;
-  return active && typeof active.matches === 'function' && active.matches('[data-wol-password],[data-wol-select],[data-traffic-password],[data-router-notes-input],[data-vps-field]') ? active : null;
+  return active && typeof active.matches === 'function' && active.matches('[data-wol-password],[data-wol-select],[data-router-notes-input],[data-vps-field]') ? active : null;
 }}
 
 function shouldDeferRouterRender() {{
@@ -5833,66 +5766,6 @@ function trafficMetaText(state) {{
   return 'Открой панель, чтобы получить список клиентов и их трафик.';
 }}
 
-function renderTrafficSummary(state, clients) {{
-  const count = Array.isArray(clients) ? clients.length : 0;
-  const chips = [`<span class="trafficSummaryChip accent">${{count}} клиентов</span>`];
-  if (state && state.loaded && !state.trafficSupported) {{
-    chips.push('<span class="trafficSummaryChip muted">Без счетчиков трафика</span>');
-  }}
-  return `<div class="trafficSummary">${{chips.join('')}}</div>`;
-}}
-
-function renderTrafficPanel(router) {{
-  const state = getTrafficState(router.id);
-  const panelId = trafficPanelId(router.id);
-  const clients = Array.isArray(state.clients) ? state.clients : [];
-  const metaClass = state.error ? 'wolMeta bad' : 'wolMeta';
-  const rows = clients.length
-    ? clients.map((client) => {{
-        const tags = trafficClientTags(client).map((tag) => `<span class="trafficTag">${{escapeHtml(tag)}}</span>`).join('');
-        return `<div class="trafficRow">
-          <div class="trafficRowTop">
-            <div class="trafficIdentity">
-              <div class="trafficName">${{escapeHtml(trafficClientTitle(client))}}</div>
-              <div class="trafficMetaLine">${{escapeHtml(trafficClientMeta(client) || 'Без IP/MAC данных')}}</div>
-            </div>
-            <div class="trafficTotalBadge">
-              <span>Всего</span>
-              <strong>${{escapeHtml(formatTrafficBytes(client.total_bytes))}}</strong>
-            </div>
-          </div>
-          ${{tags ? `<div class="trafficTagRow">${{tags}}</div>` : ''}}
-          <div class="trafficStats">
-            <div class="trafficStat"><span>Вход</span><strong>${{escapeHtml(formatTrafficBytes(client.rx_bytes))}}</strong></div>
-            <div class="trafficStat"><span>Выход</span><strong>${{escapeHtml(formatTrafficBytes(client.tx_bytes))}}</strong></div>
-            <div class="trafficStat trafficStatTotal"><span>Всего</span><strong>${{escapeHtml(formatTrafficBytes(client.total_bytes))}}</strong></div>
-          </div>
-        </div>`;
-      }}).join('')
-    : '<div class="wolPickerEmpty">Клиенты пока не найдены.</div>';
-  return `<div class="trafficPanel" id="${{escapeAttr(panelId)}}"${{state.open ? '' : ' hidden'}}>
-    <div class="wolHeader">
-      <h3 class="wolTitle">Клиенты Traffic</h3>
-    </div>
-    <div class="trafficControls">
-      <label class="wolField trafficPasswordField">
-        <span>SSH пароль</span>
-        <input type="password" data-traffic-password="${{escapeAttr(router.id)}}" value="${{escapeAttr(state.sshPassword || '')}}" placeholder="Если SSH по паролю" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="done"${{state.loading ? ' disabled' : ''}}>
-      </label>
-      <div class="wolField trafficStatusField">
-        <span>Статус</span>
-        <div class="${{metaClass}}">${{escapeHtml(trafficMetaText(state))}}</div>
-      </div>
-      <button class="btn trafficActionBtn" type="button" data-traffic-refresh="${{escapeAttr(router.id)}}"${{state.loading ? ' disabled' : ''}}>Обновить</button>
-      <button class="btn trafficDangerBtn trafficActionBtn" type="button" data-traffic-reset="${{escapeAttr(router.id)}}" title="Сбросить трафик"${{state.loading ? ' disabled' : ''}}>Сброс</button>
-    </div>
-    ${{renderTrafficSummary(state, clients)}}
-    <div class="trafficViewport" data-traffic-viewport="${{escapeAttr(router.id)}}">
-      <div class="trafficList">${{rows}}</div>
-    </div>
-  </div>`;
-}}
-
 function renderWolPanel(router) {{
   const state = getWolState(router.id);
   const panelId = wolPanelId(router.id);
@@ -5965,7 +5838,7 @@ function renderWolPanelRich(router) {{
           </span>
           <span class="wolPickerChevron">${{state.pickerOpen ? '&#9650;' : '&#9660;'}}</span>
         </button>
-        ${{state.pickerOpen ? `<div class="wolPickerList">${{deviceList}}</div>` : ''}}
+        ${{state.pickerOpen ? `<div class="wolPickerList" data-wol-picker-list="${{escapeAttr(router.id)}}">${{deviceList}}</div>` : ''}}
       </div>
       <label class="wolField">
         <span>SSH пароль</span>
@@ -7844,14 +7717,9 @@ function render(list) {{
       : `<span class="btn disabled">SSH</span>`;
     const wolReady = routerSupportsWol(r) && !!permissions.wol;
     const wolState = getWolState(r.id);
-    const trafficState = getTrafficState(r.id);
-    const trafficReady = sshReady && !!permissions.traffic;
     const wolButton = wolReady
       ? `<button class="btn" data-wol-toggle="${{escapeAttr(r.id)}}" type="button">${{wolState.open ? 'Скрыть Wake-on-LAN' : 'Wake-on-LAN'}}</button>`
       : `<span class="btn disabled">Wake-on-LAN</span>`;
-    const trafficButton = trafficReady
-      ? `<button class="btn" data-traffic-toggle="${{escapeAttr(r.id)}}" type="button">${{trafficState.open ? 'Скрыть Клиенты Traffic' : 'Клиенты Traffic'}}</button>`
-      : `<span class="btn disabled">Клиенты Traffic</span>`;
     const notesPreview = String(r.notes_preview || routerNotesPreview(r.notes || ''));
     const notesButton = !!permissions.notes
       ? `<a class="btn" href="${{escapeAttr(r.notes_url || ('/router/' + encodeURIComponent(r.id) + '/notes'))}}" target="_blank" rel="noopener noreferrer">Заметки</a>`
@@ -7894,12 +7762,10 @@ function render(list) {{
         ${{adminButton}}
         ${{sshButton}}
         ${{wolButton}}
-        ${{trafficButton}}
         ${{permissions.config ? `<a class="btn" href="${{escapeAttr(r.config_url)}}">OpenWrt config</a>` : '<span class="btn disabled">OpenWrt config</span>'}}
         ${{permissions.delete ? `<button class="btn" data-delete="${{escapeAttr(r.id)}}">Удалить</button>` : '<span class="btn disabled">Удалить</span>'}}
       </div>
       ${{wolReady ? renderWolPanelResponsive(r) : ''}}
-      ${{trafficReady ? renderTrafficPanel(r) : ''}}
       </div>
     </article>`;
   }}).join('');
@@ -8053,14 +7919,9 @@ render = function(list) {{
       : `<span class="btn disabled">SSH</span>`;
     const wolReady = routerSupportsWol(r) && !!permissions.wol;
     const wolState = getWolState(r.id);
-    const trafficState = getTrafficState(r.id);
-    const trafficReady = sshReady && !!permissions.traffic;
     const wolButton = wolReady
       ? `<button class="btn" data-wol-toggle="${{escapeAttr(r.id)}}" type="button">${{wolState.open ? 'Скрыть Wake-on-LAN' : 'Wake-on-LAN'}}</button>`
       : `<span class="btn disabled">Wake-on-LAN</span>`;
-    const trafficButton = trafficReady
-      ? `<button class="btn" data-traffic-toggle="${{escapeAttr(r.id)}}" type="button">${{trafficState.open ? 'Скрыть Клиенты Traffic' : 'Клиенты Traffic'}}</button>`
-      : `<span class="btn disabled">Клиенты Traffic</span>`;
     const notesPreview = String(r.notes_preview || routerNotesPreview(r.notes || ''));
     const notesButton = !!permissions.notes
       ? `<a class="btn" href="${{escapeAttr(r.notes_url || ('/router/' + encodeURIComponent(r.id) + '/notes'))}}" target="_blank" rel="noopener noreferrer">Заметки</a>`
@@ -8120,13 +7981,11 @@ render = function(list) {{
         ${{adminButton}}
         ${{sshButton}}
         ${{wolButton}}
-        ${{trafficButton}}
         ${{notesButton}}
         ${{permissions.config ? `<a class="btn" href="${{escapeAttr(r.config_url)}}">OpenWrt config</a>` : '<span class="btn disabled">OpenWrt config</span>'}}
         ${{permissions.delete ? `<button class="btn" data-delete="${{escapeAttr(r.id)}}">Удалить</button>` : '<span class="btn disabled">Удалить</span>'}}
       </div>
       ${{wolReady ? renderWolPanelResponsive(r) : ''}}
-      ${{trafficReady ? renderTrafficPanel(r) : ''}}
       </div>
     </article>${{groupEnd}}`;
   }}).join('');
@@ -8136,10 +7995,11 @@ render = function(list) {{
 function renderRouterView() {{
   const pageScrollX = window.scrollX || window.pageXOffset || 0;
   const pageScrollY = window.scrollY || window.pageYOffset || 0;
-  const trafficViewportState = Array.from(document.querySelectorAll('[data-traffic-viewport]')).map((node) => ({{
-    routerId: String(node.dataset.trafficViewport || ''),
-    scrollTop: node.scrollTop || 0
-  }})).filter((item) => item.routerId);
+  const wolPickerScrollTops = new Map();
+  document.querySelectorAll('[data-wol-picker-list]').forEach((list) => {{
+    const routerId = String(list.dataset.wolPickerList || '');
+    if (routerId) wolPickerScrollTops.set(routerId, list.scrollTop);
+  }});
   const allRouters = window.ROUTERS || [];
   const visibleRouters = filteredRouters(allRouters);
   renderRouterStats(allRouters);
@@ -8157,13 +8017,12 @@ function renderRouterView() {{
   }}
   pendingRouterViewRestore = window.requestAnimationFrame(() => {{
     window.scrollTo(pageScrollX, pageScrollY);
-    trafficViewportState.forEach((item) => {{
-      const viewport = Array.from(document.querySelectorAll('[data-traffic-viewport]')).find((node) => String(node.dataset.trafficViewport || '') === item.routerId);
-      if (viewport) viewport.scrollTop = item.scrollTop;
+    wolPickerScrollTops.forEach((scrollTop, routerId) => {{
+      const list = Array.from(document.querySelectorAll('[data-wol-picker-list]')).find((item) => String(item.dataset.wolPickerList || '') === routerId);
+      if (list) list.scrollTop = scrollTop;
     }});
     pendingRouterViewRestore = 0;
   }});
-  syncTrafficAutoRefresh();
 }}
 
 async function loadWolDevices(routerId, force = false) {{
@@ -8670,10 +8529,12 @@ document.getElementById('xrayRestart').addEventListener('click', handleXrayResta
 if (mobileXrayReload) mobileXrayReload.addEventListener('click', handleXrayReload);
 if (mobileXrayRestart) mobileXrayRestart.addEventListener('click', handleXrayRestart);
 
-async function loadRouters() {{
+async function loadRouters(options = {{}}) {{
+  if (options && options.automatic && hasOpenWolPanel()) return;
   const res = await fetch('/api/routers', {{cache: 'no-store'}});
   if (res.ok) {{
     const data = await res.json();
+    if (options && options.automatic && hasOpenWolPanel()) return;
     window.ROUTERS = data.routers;
     renderRouterGroups();
     syncRouterNotesState(window.ROUTERS);
@@ -8878,15 +8739,13 @@ cards.addEventListener('input', (ev) => {{
     }});
     return;
   }}
-  const routerId = ev.target?.dataset?.wolPassword || ev.target?.dataset?.trafficPassword;
+  const routerId = ev.target?.dataset?.wolPassword;
   if (!routerId) return;
   const value = ev.target.value || '';
   ev.stopPropagation();
   saveWolPassword(routerId, value);
   const wolState = getWolState(routerId);
   wolStateByRouter.set(String(routerId), Object.assign({{}}, wolState, {{sshPassword: value, error: '', message: ''}}));
-  const trafficState = getTrafficState(routerId);
-  trafficStateByRouter.set(String(routerId), Object.assign({{}}, trafficState, {{sshPassword: value, error: '', message: ''}}));
 }});
 
 cards.addEventListener('change', (ev) => {{
@@ -8901,12 +8760,12 @@ cards.addEventListener('change', (ev) => {{
 }});
 
 cards.addEventListener('focusin', (ev) => {{
-  if (!ev.target?.matches?.('[data-wol-password],[data-wol-select],[data-traffic-password],[data-router-notes-input]')) return;
+  if (!ev.target?.matches?.('[data-wol-password],[data-wol-select],[data-router-notes-input]')) return;
   clearPendingWolBlurFlush();
 }});
 
 cards.addEventListener('focusout', (ev) => {{
-  if (!ev.target?.matches?.('[data-wol-password],[data-wol-select],[data-traffic-password],[data-router-notes-input]')) return;
+  if (!ev.target?.matches?.('[data-wol-password],[data-wol-select],[data-router-notes-input]')) return;
   scheduleWolBlurFlush();
 }});
 
@@ -8940,7 +8799,7 @@ cards.addEventListener('pointerup', (ev) => {{
 }});
 
 cards.addEventListener('click', async (ev) => {{
-  const secureField = ev.target.closest('[data-wol-password],[data-traffic-password],[data-router-notes-input]');
+  const secureField = ev.target.closest('[data-wol-password],[data-router-notes-input]');
   if (secureField) {{
     ev.stopPropagation();
     return;
@@ -8976,17 +8835,6 @@ cards.addEventListener('click', async (ev) => {{
     if (!open) flushDeferredRouterRender();
     if (open) {{
       await loadWolDevices(wolToggleId, false);
-    }}
-    return;
-  }}
-  const trafficToggleId = ev.target?.closest?.('[data-traffic-toggle]')?.dataset?.trafficToggle;
-  if (trafficToggleId) {{
-    const state = getTrafficState(trafficToggleId);
-    const open = !state.open;
-    setTrafficState(trafficToggleId, {{open, error: '', message: open ? state.message : ''}});
-    requestRouterRender();
-    if (open) {{
-      await loadTrafficClients(trafficToggleId, false);
     }}
     return;
   }}
@@ -9090,16 +8938,6 @@ cards.addEventListener('click', async (ev) => {{
   const wolRefreshId = ev.target?.closest?.('[data-wol-refresh]')?.dataset?.wolRefresh;
   if (wolRefreshId) {{
     await loadWolDevices(wolRefreshId, true);
-    return;
-  }}
-  const trafficRefreshId = ev.target?.closest?.('[data-traffic-refresh]')?.dataset?.trafficRefresh;
-  if (trafficRefreshId) {{
-    await loadTrafficClients(trafficRefreshId, true);
-    return;
-  }}
-  const trafficResetId = ev.target?.closest?.('[data-traffic-reset]')?.dataset?.trafficReset;
-  if (trafficResetId) {{
-    await resetTrafficClients(trafficResetId);
     return;
   }}
   const wolSendId = ev.target?.closest?.('[data-wol-send]')?.dataset?.wolSend;
@@ -9778,7 +9616,6 @@ document.addEventListener('keydown', (ev) => {{
   }}
 }});
 document.addEventListener('visibilitychange', () => {{
-  syncTrafficAutoRefresh();
 }});
 document.addEventListener('click', (ev) => {{
   if (!offlineStatsExpanded) return;
@@ -11683,10 +11520,11 @@ function initVpsResourceWidgets() {{
   resume();
 }}
 initVpsResourceWidgets();
-setInterval(loadRouters, 5000);
+setInterval(() => {{
+  loadRouters({{automatic: true}}).catch(() => {{}});
+}}, 5000);
 setInterval(() => loadNotifications(), 30000);
 window.addEventListener('beforeunload', () => {{
-  clearAllTrafficAutoRefresh();
 }});
 </script>
 </body>
