@@ -93,7 +93,9 @@ AGENT_TOKEN_FILE = STATE_DIR / "agent.token"
 XRAY_WAN_RECONNECT_FILE = STATE_DIR / "xray-wan-reconnect-restart.json"
 TRAFFIC_COUNTERS_FILE = STATE_DIR / "hub-traffic-counters.json"
 ACME_WEBROOT = STATE_DIR / "acme-webroot"
-ONLINE_AFTER_SECONDS = int(os.environ.get("OWRT_REMOTE_ONLINE_AFTER", "75"))
+# Heartbeats normally arrive every 30 seconds. A short WAN/Xray rebind can
+# take longer than the old 75-second window while the reverse tunnel remains usable.
+ONLINE_AFTER_SECONDS = max(75, int(os.environ.get("OWRT_REMOTE_ONLINE_AFTER", "180")))
 DEFAULT_VLESS_PORT = int(os.environ.get("OWRT_REMOTE_VLESS_PORT", "8443"))
 REQUEST_QUEUE_SIZE = int(os.environ.get("OWRT_REMOTE_REQUEST_QUEUE_SIZE", "128"))
 ROUTER_PROXY_LIMIT = max(1, int(os.environ.get("OWRT_REMOTE_ROUTER_PROXY_LIMIT", "4")))
@@ -3446,7 +3448,7 @@ def row_to_router(row):
         data["name"] = custom_name
     last_seen = data.get("last_seen")
     service_enabled = str(status.get("service") or "").lower() != "disabled"
-    online = bool(last_seen and now_ts() - int(last_seen) <= ONLINE_AFTER_SECONDS)
+    online = bool(last_seen and now_ts() - int(last_seen) <= router_online_timeout(status))
     data["status"] = status
     data["service_enabled"] = service_enabled
     data["online"] = online
@@ -3458,6 +3460,17 @@ def row_to_router(row):
     data["xray_client_url"] = f"/router/{urllib.parse.quote(data['id'])}/xray-client.json"
     data.pop("status_json", None)
     return data
+
+
+def router_online_timeout(status):
+    """Return a heartbeat grace period that tolerates WAN/Xray rebinds."""
+    status = status if isinstance(status, dict) else {}
+    try:
+        interval = int(status.get("heartbeat_interval") or 30)
+    except (TypeError, ValueError):
+        interval = 30
+    interval = min(max(interval, 10), 3600)
+    return max(ONLINE_AFTER_SECONDS, interval * 3 + 30)
 
 
 def router_with_access(router, account):
@@ -3559,7 +3572,7 @@ def notify_router_online(router, dedupe_seconds=45):
 
 def notify_router_offline(router, dedupe_seconds=0):
     label = router_notification_label(router)
-    grace = max(ONLINE_AFTER_SECONDS, 1)
+    grace = router_online_timeout((router or {}).get("status"))
     add_notification(
         "router_offline",
         "Роутер пропал из сети",
@@ -4765,7 +4778,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
     <div class="brand">
       <div class="desktopHeader">
         <div class="desktopHeaderTop">
-          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v112</span></span></h1>
+          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v113</span></span></h1>
           <div class="routerSearchDock" id="routerSearchDock">
             <button class="routerSearchToggle" id="routerSearchToggle" type="button" aria-expanded="false" aria-controls="routerSearchPanel" data-active="false">
               <span>Поиск роутеров</span>
@@ -5118,7 +5131,7 @@ systemctl restart owrt-remote-xray</pre>
       </div>
     </div>
     <div class="mobileSearchDock" id="mobileRouterSearchDock">
-      <span class="mobileSearchVersion">v112</span>
+      <span class="mobileSearchVersion">v113</span>
       <button class="routerSearchToggle mobilePanelToggle primary" id="mobileRouterSearchToggle" type="button" aria-expanded="false" aria-controls="mobileRouterSearchPanel" data-active="false">
         <span>Поиск роутеров</span>
       </button>
@@ -12646,7 +12659,7 @@ button:hover{{filter:brightness(1.06)}}
       <form class="login" method="post" action="/login">
     {error_html}
     <span class="brand">
-      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v112</span></span></h1>
+      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v113</span></span></h1>
     </span>
     <label for="hubUsername">Логин</label>
     <input id="hubUsername" name="username" autocomplete="off" autofocus required>
@@ -13118,7 +13131,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;background:li
                 <circle cx="65" cy="59" r="3" fill="#E5F2FF"/>
               </svg>
             </div>
-            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v112</span></h2>
+            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v113</span></h2>
           </div>
         </div>
         <div class="brandBottom">

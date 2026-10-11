@@ -131,7 +131,7 @@ class HubFixture:
         assert "groups" in json.loads(self.request("/api/router-groups"))
         assert "notifications" in json.loads(self.request("/api/notifications"))
         assert self.request("/access/test-router/") == b"router proxy fixture"
-        assert b"v112" in self.request("/")
+        assert b"v113" in self.request("/")
         self.app.snapshot_router_states()
 
     def __exit__(self, *args):
@@ -428,6 +428,28 @@ class OtherResourceTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_router_online_grace_tolerates_delayed_heartbeat_and_custom_interval(self):
+        now = hub.now_ts()
+        base = {
+            "id": "delayed-router",
+            "name": "Delayed Router",
+            "custom_name": "",
+            "notes": "",
+            "created_at": now,
+            "updated_at": now,
+            "status_json": json.dumps({"heartbeat_interval": 30}),
+        }
+        router = hub.row_to_router({**base, "last_seen": now - 120})
+        self.assertTrue(router["online"], "a short WAN/Xray rebind must not mark the router offline")
+        router = hub.row_to_router({**base, "last_seen": now - 181})
+        self.assertFalse(router["online"])
+        custom = hub.row_to_router({
+            **base,
+            "status_json": json.dumps({"heartbeat_interval": 120}),
+            "last_seen": now - 350,
+        })
+        self.assertTrue(custom["online"], "the grace period must follow a slower configured heartbeat")
+
     def test_panel_api_proxy_heartbeat_and_monitor(self):
         with HubFixture() as fixture:
             for _ in range(5):

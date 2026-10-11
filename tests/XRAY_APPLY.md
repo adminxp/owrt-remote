@@ -1,4 +1,4 @@
-# Применение OpenWrt config через панель роутера (v112)
+# Применение OpenWrt config через панель роутера (v113)
 
 При отправке textarea браузер кодирует переносы строк как CRLF. CGI
 декодировал их без нормализации и записывал CR в исполняемый shell-скрипт.
@@ -22,7 +22,7 @@ CRLF и LF, heredoc, пустые строки, кодированные сим�
 
 Скрипт обновляет только CGI на роутере. VPS обновлять для этого фикса
 не требуется. До замены сохраняется первая резервная копия CGI:
-`/root/owrt-remote-backup-before-xray-apply-v112/owrt-remote`.
+`/root/owrt-remote-backup-before-xray-apply-v113/owrt-remote`.
 
 Из PowerShell Windows 11; замените IP, если адрес роутера отличается:
 

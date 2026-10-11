@@ -346,6 +346,24 @@ class RouterShellTests(unittest.TestCase):
         self.assertIn("<https://hub.example/api/heartbeat>", args)
         self.assertNotIn("<-k>", args)
         self.assertIn("<--max-time>\n<10>", args)
+        self.assertIn("<--location>", args)
+        self.assertIn("<--post301>", args)
+        self.assertIn("<--post302>", args)
+        self.assertIn("<--post303>", args)
+
+    def test_plain_http_heartbeat_accepts_json_after_redirect_follow(self):
+        self.config(vps_host="193.233.82.38", vps_host_mode="manual")
+        result = self.run_shell('''
+curl() {
+    printf '<%s>\n' "$@" >"$TEST_ROOT/curl"
+    printf '{"ok":true}'
+}
+post_json http://hub.example/api/heartbeat test-token "$TEST_ROOT/payload"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = (self.directory / "curl").read_text()
+        self.assertIn("<--location>", args)
+        self.assertIn("<--post301>", args)
 
     def test_literal_ip_fallback_is_not_rewritten_to_a_different_pin(self):
         self.config(vps_host="193.233.82.38", vps_host_mode="manual")

@@ -1,4 +1,4 @@
-# Фиксация VPS host и независимое соединение Remote через WAN (v112)
+# Фиксация VPS host и независимое соединение Remote через WAN (v113)
 
 `vps_host_mode=manual` сохраняет заданный на роутере адрес. Это значение
 используется и когда опция отсутствует у старой установки. Только явно
@@ -96,21 +96,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.
 
 Установка загружает локальные файлы, без Git. До остановки службы проверяются
 доступность WAN и поддержка таблицы реальной командой ip на роутере.
-На роутер загружается и файл LuCI: версия v112 появляется и в основной
+На роутер загружается и файл LuCI: версия v113 появляется и в основной
 CGI-панели, и в странице входа в неё через LuCI.
 Сначала сохраняются файлы
 и конфигурация; после замены проверяется heartbeat/health. При ошибке
 автоматически восстанавливается состояние перед текущей попыткой.
 Сохранённая резервная копия для ручного отката не перезаписывается.
 
-* Роутер: `/root/owrt-remote-backup-before-host-policy-v112` — агент,
+* Роутер: `/root/owrt-remote-backup-before-host-policy-v113` — агент,
   helper, init, CGI, UCI-конфигурация и Xray-конфиг (в закрытом каталоге).
-* VPS: `/opt/owrt-remote/owrt-remote-hub.py.bak-before-host-policy-v112`.
+* VPS: `/opt/owrt-remote/owrt-remote-hub.py.bak-before-host-policy-v113`.
   База роутеров и настройки авторизации не заменяются.
 
-Успешная установка заканчивается `HOST_POLICY_ROUTER_V112_OK` на роутере
-и `HOST_POLICY_VPS_V112_Install_OK` на VPS. Старые резервные копии предыдущей
-версии сохраняются; новые команды отката используют отдельные копии для v112.
+Успешная установка заканчивается `HOST_POLICY_ROUTER_V113_OK` на роутере
+и `HOST_POLICY_VPS_V113_Install_OK` на VPS. Старые резервные копии предыдущей
+версии сохраняются; новые команды отката используют отдельные копии для v113.
 
 ### Переход с nftables-маркировки на адресную маршрутизацию
 
@@ -119,11 +119,11 @@ CGI-панели, и в странице входа в неё через LuCI.
 Обновление VPS для этого изменения не требуется.
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -PreserveConnectionSettings -BackupName "podkop-compat-v112" -Action Install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -BackupName "podkop-compat-v112" -Action Rollback
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -PreserveConnectionSettings -BackupName "podkop-compat-v113" -Action Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -BackupName "podkop-compat-v113" -Action Rollback
 ```
 
-Копия: `/root/owrt-remote-backup-before-podkop-compat-v112`.
+Копия: `/root/owrt-remote-backup-before-podkop-compat-v113`.
 После установки повторите диагностику Podkop. Предупреждение от прежних правил
 Remote должно исчезнуть. Настоящие дополнительные правила других приложений
 по-прежнему обнаруживаются штатной диагностикой.

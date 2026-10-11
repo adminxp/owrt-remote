@@ -664,13 +664,15 @@ run_xray() {
 }
 
 heartbeat_json() {
-	local router_id router_name role public_url hub_url xray_state service_state ssh_state event
+	local router_id router_name role public_url hub_url xray_state service_state ssh_state event heartbeat_interval
 	event="${1:-}"
 	router_id="$(safe_id "$(uci_get router_id main)")"
 	router_name="$(uci_get router_name "$router_id")"
 	role="$(uci_get role node)"
 	public_url="$(uci_get public_url '')"
 	hub_url="$(uci_get hub_url '')"
+	heartbeat_interval="$(safe_num "$(uci_get heartbeat_interval 30)" 30)"
+	[ "$heartbeat_interval" -lt 10 ] && heartbeat_interval=10
 
 	if xray_running; then
 		xray_state="running"
@@ -706,6 +708,7 @@ heartbeat_json() {
   "vps_host": $(json_string "$(uci_get vps_host '')"),
   "vps_host_mode": $(json_string "$(vps_host_mode)"),
   "wan_direct": $(json_string "$(uci_get wan_direct 0)"),
+  "heartbeat_interval": $heartbeat_interval,
   "uptime": $(safe_num "$(uptime_seconds)" 0),
   "load": $(json_string "$(load_text)"),
   "memory": $(json_string "$(memory_text)"),
@@ -730,7 +733,8 @@ post_json() {
 	fi
 
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsS --connect-timeout 4 --max-time 10 --noproxy '*' \
+		curl -fsSL --location --max-redirs 3 --post301 --post302 --post303 \
+			--connect-timeout 4 --max-time 10 --noproxy '*' \
 			-H "Authorization: Bearer $token" \
 			-H "Content-Type: application/json" \
 			--data-binary "@$file" "$url"
@@ -850,7 +854,8 @@ send_heartbeat() {
 	used=0
 	for endpoint in $(heartbeat_candidate_endpoints); do
 		used=1
-		if post_json "$endpoint" "$token" "$tmp" >"$response"; then
+		if post_json "$endpoint" "$token" "$tmp" >"$response" \
+			&& grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
 			fallback_base="$(heartbeat_base_from_endpoint "$endpoint")"
 			if ! heartbeat_apply_hub_update "$response" "$fallback_base"; then
 				rm -f "$tmp" "$response"

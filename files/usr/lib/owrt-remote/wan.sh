@@ -380,8 +380,10 @@ wan_post_json() {
 		grep -Fqx "$ip $port" "$WAN_STATE/endpoints" || return 1
 	fi
 	case "$ip" in *:*) ip="[$ip]" ;; esac
-	# No redirect-following or certificate bypass; Host and SNI remain the URL's.
-	curl -fsS --noproxy '*' --interface "$device" --connect-timeout 4 --max-time 10 \
+	# Follow nginx HTTP-to-HTTPS redirects while preserving this JSON POST.
+	# Host and TLS SNI remain the configured URL's; no certificate bypass is used.
+	curl -fsSL --location --max-redirs 3 --post301 --post302 --post303 \
+		--noproxy '*' --interface "$device" --connect-timeout 4 --max-time 10 \
 		--resolve "$host:$port:$ip" \
 		-H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
 		--data-binary "@$file" "$url"
