@@ -131,7 +131,7 @@ class HubFixture:
         assert "groups" in json.loads(self.request("/api/router-groups"))
         assert "notifications" in json.loads(self.request("/api/notifications"))
         assert self.request("/access/test-router/") == b"router proxy fixture"
-        assert b"v113" in self.request("/")
+        assert b"v114" in self.request("/")
         self.app.snapshot_router_states()
 
     def __exit__(self, *args):
@@ -296,6 +296,16 @@ class OtherResourceTests(unittest.TestCase):
             self.assertEqual(hub.send_web_push({"endpoint": "https://test"}, {}), "gone")
             response.close.assert_called_once()
 
+    def test_web_push_reuses_existing_registration_before_subscribing(self):
+        page = hub.dashboard_html([], "test-owner", auth_bootstrap={"is_owner": True})
+        self.assertIn("subscription = await pushManager.getSubscription();", page)
+        self.assertIn("Update the existing registration in place", page)
+        self.assertIn("forceFresh: false", page)
+        self.assertNotIn("directSubscribeFirst: isIOSDevice()", page)
+        self.assertIn("pushsubscriptionchange", hub.service_worker_js())
+        self.assertIn("push_test: false", hub.service_worker_js())
+        self.assertIn('if not bool(payload.get("push_test", True))', SOURCE.read_text(encoding="utf-8"))
+
     def test_atomic_failure_removes_temp_and_preserves_target(self):
         with tempfile.TemporaryDirectory(dir=STATE.name) as name:
             target = Path(name) / "original.txt"
@@ -428,6 +438,30 @@ class OtherResourceTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_push_subscription_sync_does_not_send_duplicate_test(self):
+        with HubFixture() as fixture:
+            payload = {
+                "endpoint": "https://push.example/subscription-sync",
+                "keys": {"p256dh": "p256dh", "auth": "auth"},
+                "client_hint": "hub",
+                "push_test": False,
+            }
+            with mock.patch.object(hub, "send_web_push") as send:
+                response = json.loads(fixture.request("/api/push/subscribe", payload))
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["delivery"], "registered")
+            send.assert_not_called()
+
+    def test_heartbeat_response_recovers_https_from_reported_router_settings(self):
+        with HubFixture() as fixture:
+            payload = {"id": "test-router", "hub_url": "https://hub.example:9443",
+                       "public_url": "http://hub.example:8088", "vps_host_mode": "manual"}
+            response = json.loads(fixture.request("/api/heartbeat", payload))
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["hub_update"]["hub_url"], "https://hub.example:9443")
+            self.assertEqual(response["hub_update"]["public_url"], "https://hub.example:9443")
+            self.assertNotIn("vps_host", response["hub_update"])
+
     def test_router_online_grace_tolerates_delayed_heartbeat_and_custom_interval(self):
         now = hub.now_ts()
         base = {

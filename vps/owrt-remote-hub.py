@@ -1367,7 +1367,7 @@ def row_int_value(row, key, default=0):
         return int(default)
 
 
-def router_reported_connection(router, *, legacy_mode="auto"):
+def router_reported_status(router):
     row = dict(router or {})
     status = row.get("status")
     if not isinstance(status, dict):
@@ -1377,6 +1377,12 @@ def router_reported_connection(router, *, legacy_mode="auto"):
             status = {}
     if not isinstance(status, dict):
         status = {}
+    return status
+
+
+def router_reported_connection(router, *, legacy_mode="auto"):
+    row = dict(router or {})
+    status = router_reported_status(row)
     # Legacy agents had automatic endpoint updates. Keep that server behavior
     # until they report a policy; the patched agent itself defaults to manual.
     mode = legacy_mode if status.get("vps_host_mode") is None else ("auto" if status.get("vps_host_mode") == "auto" else "manual")
@@ -1431,14 +1437,34 @@ echo VPS_HOST_APPLIED
 '''
 
 
-def canonical_router_hub_update(router, app_public_url="", request_origin=""):
-    router = router or {}
+def router_hub_origins(router, app_public_url="", request_origin=""):
+    router = dict(router or {})
+    status = router_reported_status(router)
     router_public_url = public_url_origin(router.get("public_url", ""))
     app_origin = public_url_origin(app_public_url)
     request_origin = public_url_origin(request_origin)
     public_url = prefer_origin_with_explicit_port(router_public_url, app_origin)
     public_url = prefer_origin_with_explicit_port(public_url, request_origin)
+    # A stale HTTP row or an internal HTTP request must not override a known
+    # HTTPS origin for the same Hub. Keep custom hosts and HTTPS ports intact.
+    if urllib.parse.urlsplit(public_url).scheme == "http":
+        for candidate in (
+            app_origin,
+            request_origin,
+            public_url_origin(status.get("hub_url", "")),
+            public_url_origin(status.get("public_url", "")),
+        ):
+            parts = urllib.parse.urlsplit(candidate)
+            if parts.scheme == "https" and parts.hostname == urllib.parse.urlsplit(public_url).hostname:
+                public_url = candidate
+                break
     hub_url = public_url or request_origin
+    return public_url, hub_url
+
+
+def canonical_router_hub_update(router, app_public_url="", request_origin=""):
+    router = router or {}
+    public_url, hub_url = router_hub_origins(router, app_public_url, request_origin)
     vps_host = str(router.get("vps_host") or "").strip()
     if not vps_host and hub_url:
         try:
@@ -2504,6 +2530,8 @@ def send_web_push(subscription, payload):
         detail = detail[:160]
         if status_code in (404, 410):
             return "gone"
+        if status_code in (400, 401, 403):
+            return "stale"
         if detail:
             return f"error:{status_code or exc.__class__.__name__}:{detail}"
         return f"error:{status_code or exc.__class__.__name__}"
@@ -2519,6 +2547,8 @@ def push_result_message(result, subscription=None):
         return "На VPS не готов Web Push. Запусти свежий install-vps.sh и проверь HTTPS."
     if result == "gone":
         return "Подписка браузера устарела. Включи push заново на этом устройстве."
+    if result == "stale":
+        return "Подписка браузера больше не совпадает с ключами VPS. Hub удалил её; включи Push заново на этом устройстве."
     if str(result).startswith("error:"):
         parts = str(result).split(":", 2)
         code = parts[1] if len(parts) > 1 and parts[1] else "unknown"
@@ -2551,7 +2581,7 @@ def queue_web_push_payload(payload, subscriptions=None):
                     "result": result,
                 }
             )
-            if result == "gone":
+            if result in ("gone", "stale"):
                 gone.append(subscription.get("endpoint", ""))
         for endpoint in gone:
             remove_push_subscription(endpoint)
@@ -2581,6 +2611,56 @@ self.addEventListener('message', event => {
 
 self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim());
+});
+
+function pushBase64ToUint8Array(value) {
+  const padding = '='.repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+async function syncChangedPushSubscription(event) {
+  const oldEndpoint = event && event.oldSubscription && event.oldSubscription.endpoint || '';
+  let subscription = event && event.newSubscription || null;
+  try {
+    if (!subscription) {
+      const keyResponse = await fetch('/api/push/vapid-public-key', {cache: 'no-store', credentials: 'same-origin'});
+      const keyData = await keyResponse.json().catch(() => ({}));
+      if (!keyResponse.ok || !keyData.ok || !keyData.publicKey) return;
+      subscription = await self.registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: pushBase64ToUint8Array(keyData.publicKey)
+      });
+    }
+    if (!subscription) return;
+    const body = {
+      ...(subscription.toJSON ? subscription.toJSON() : subscription),
+      client_hint: 'hub',
+      push_test: false
+    };
+    const response = await fetch('/api/push/subscribe', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) return;
+    if (oldEndpoint && subscription.endpoint && oldEndpoint !== subscription.endpoint) {
+      await fetch('/api/push/unsubscribe', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({endpoint: oldEndpoint})
+      }).catch(() => {});
+    }
+  } catch (e) {}
+}
+
+self.addEventListener('pushsubscriptionchange', event => {
+  event.waitUntil(syncChangedPushSubscription(event));
 });
 
 self.addEventListener('push', event => {
@@ -3695,12 +3775,10 @@ def rewrite_router_endpoints(conn, vps_host="", public_url="", preserve_vps_fall
 
 def router_current_hub_bundle(router, app_public_url="", request_origin="", fallback_host=""):
     row = dict(router or {})
-    router_public_url = public_url_origin(row.get("public_url", ""))
     app_origin = public_url_origin(app_public_url)
     request_origin = public_url_origin(request_origin)
-    public_url = prefer_origin_with_explicit_port(router_public_url, app_origin)
-    public_url = prefer_origin_with_explicit_port(public_url, request_origin)
-    hub_url = public_url or request_origin or router_fallback_hub_url(row, fallback_host, 8088)
+    public_url, hub_url = router_hub_origins(row, app_public_url, request_origin)
+    hub_url = hub_url or router_fallback_hub_url(row, fallback_host, 8088)
     reported_mode, reported_host = router_reported_connection(row)
     config_vps_host = (
         (reported_host if reported_mode == "manual" else "")
@@ -4778,7 +4856,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
     <div class="brand">
       <div class="desktopHeader">
         <div class="desktopHeaderTop">
-          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v113</span></span></h1>
+          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v114</span></span></h1>
           <div class="routerSearchDock" id="routerSearchDock">
             <button class="routerSearchToggle" id="routerSearchToggle" type="button" aria-expanded="false" aria-controls="routerSearchPanel" data-active="false">
               <span>Поиск роутеров</span>
@@ -5131,7 +5209,7 @@ systemctl restart owrt-remote-xray</pre>
       </div>
     </div>
     <div class="mobileSearchDock" id="mobileRouterSearchDock">
-      <span class="mobileSearchVersion">v113</span>
+      <span class="mobileSearchVersion">v114</span>
       <button class="routerSearchToggle mobilePanelToggle primary" id="mobileRouterSearchToggle" type="button" aria-expanded="false" aria-controls="mobileRouterSearchPanel" data-active="false">
         <span>Поиск роутеров</span>
       </button>
@@ -10478,7 +10556,7 @@ let pushVapidConfig = embeddedPushVapidConfig();
 let pushVapidPromise = null;
 
 function pushEnvironmentReady() {{
-  return !!(((pushServiceWorkerReady && pushServiceWorkerReady.pushManager) || hasWindowPushManager()) && pushVapidConfig && pushVapidConfig.publicKey);
+  return !!(((pushRegistrationUsable(pushServiceWorkerReady)) || hasWindowPushManager()) && pushVapidConfig && pushVapidConfig.publicKey);
 }}
 
 function ensureClientVersion() {{
@@ -10669,7 +10747,9 @@ async function warmPushEnvironment({{silent = true}} = {{}}) {{
   try {{
     const tasks = [fetchPushVapidConfig()];
     if ('serviceWorker' in navigator) {{
-      tasks.unshift(ensurePushServiceWorkerReady({{forceFresh: isIOSDevice() && !hasWindowPushManager(), forceUpdate: isIOSDevice() && !hasWindowPushManager()}}).catch((e) => {{
+      // Update the existing registration in place. On iOS, forcing a new
+      // registration can detach Safari's existing PushSubscription.
+      tasks.unshift(ensurePushServiceWorkerReady({{forceFresh: false, forceUpdate: true}}).catch((e) => {{
         if (hasWindowPushManager()) return null;
         throw e;
       }}));
@@ -10710,17 +10790,20 @@ async function resolvePushSubscriptionManager({{forceFresh = false, forceUpdate 
   }};
 }}
 
-async function registerPushSubscription({{preferCached = false, directSubscribeFirst = false}} = {{}}) {{
+async function registerPushSubscription({{preferCached = false, directSubscribeFirst = false, sendTest = true}} = {{}}) {{
   let ready = pushServiceWorkerReady;
   let keyData = pushVapidConfig;
   let pushManager = ready && ready.pushManager ? ready.pushManager : null;
   let pushSource = 'serviceWorker';
   const preferWindowManager = hasWindowPushManager();
-  const requireFreshRegistration = preferWindowManager || isIOSDevice() || !preferCached || !pushEnvironmentReady();
+  // Read an existing subscription before subscribing. Calling subscribe()
+  // first is unreliable in iOS standalone Safari and can produce a broken
+  // PushRegistration even when the current subscription is still valid.
+  const requireFreshRegistration = preferWindowManager || !pushEnvironmentReady();
   if (requireFreshRegistration) {{
     const resolved = await resolvePushSubscriptionManager({{
-      forceFresh: !preferWindowManager && isIOSDevice(),
-      forceUpdate: !preferWindowManager && isIOSDevice()
+      forceFresh: false,
+      forceUpdate: false
     }});
     ready = resolved.registration;
     keyData = resolved.keyData;
@@ -10738,22 +10821,10 @@ async function registerPushSubscription({{preferCached = false, directSubscribeF
   const trySubscribe = async () => {{
     return await pushManager.subscribe(subscribeOptions);
   }};
-  if (directSubscribeFirst && isIOSDevice()) {{
-    try {{
-      subscription = await trySubscribe();
-    }} catch (e) {{
-      if (!(pushSource === 'serviceWorker' && isPushInitStateError(e))) {{
-        if (String((e && e.name) || '').toLowerCase() === 'aborterror') {{
-          throw new Error('iPhone прервал создание push-подписки. Полностью закрой Hub свайпом, открой снова с экрана Домой и повтори "Включить Push".');
-        }}
-      }}
-      if (pushSource !== 'serviceWorker' || !isPushInitStateError(e)) {{
-        throw new Error(`pushManager.subscribe failed: ${{pushErrorText(e, 'unknown error')}}`);
-      }}
-    }}
-  }}
   try {{
-    if (!subscription) subscription = await pushManager.getSubscription();
+    // Existing subscriptions must be reused. This is essential for iOS,
+    // where subscribe() before getSubscription() may throw InvalidStateError.
+    subscription = await pushManager.getSubscription();
   }} catch (e) {{
     if (!isPushInitStateError(e)) {{
       throw new Error(`pushManager.getSubscription failed: ${{pushErrorText(e, 'unknown error')}}`);
@@ -10761,7 +10832,9 @@ async function registerPushSubscription({{preferCached = false, directSubscribeF
     if (pushSource !== 'serviceWorker') {{
       throw new Error(`pushManager.getSubscription failed: ${{pushErrorText(e, 'unknown error')}}`);
     }}
-    await resetHubPushState({{unregister: false}});
+    // Only the recovery path unregisters the worker. Normal checks reuse the
+    // current registration so Safari keeps its valid PushSubscription.
+    await resetHubPushState({{unregister: true}});
     const resolved = await resolvePushSubscriptionManager({{forceFresh: true, forceUpdate: true}});
     ready = resolved.registration;
     keyData = resolved.keyData;
@@ -10809,7 +10882,7 @@ async function registerPushSubscription({{preferCached = false, directSubscribeF
     res = await fetch('/api/push/subscribe', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{...(subscription.toJSON ? subscription.toJSON() : subscription), client_hint: currentClientHint()}})
+      body: JSON.stringify({{...(subscription.toJSON ? subscription.toJSON() : subscription), client_hint: currentClientHint(), push_test: !!sendTest}})
     }});
   }} catch (e) {{
     throw new Error(`Не смог отправить подписку на VPS: ${{pushErrorText(e, 'network error')}}`);
@@ -10857,7 +10930,7 @@ async function enableNotifications() {{
     }}
     showRouterMsg('Включаю настоящий Web Push для этого устройства...');
     setNotifyStatus(`Пробую включить Web Push. Текущее состояние: ${{pushSupportSummary()}}`);
-    await registerPushSubscription({{preferCached: isIOSDevice(), directSubscribeFirst: isIOSDevice()}});
+    await registerPushSubscription({{preferCached: isIOSDevice()}});
     localStorage.setItem('owrtPushEnabled', '1');
     showRouterMsg('Push включён. Теперь уведомления должны приходить даже когда вкладка закрыта.');
     setNotifyStatus(`Web Push включён. Текущее состояние: ${{pushSupportSummary()}}`);
@@ -10899,7 +10972,7 @@ async function testPushDelivery() {{
     }}
     showRouterMsg('Проверяю доставку Web Push на это устройство...');
     setNotifyStatus(`Проверяю доставку Web Push. Текущее состояние: ${{pushSupportSummary()}}`);
-    const data = await registerPushSubscription({{preferCached: isIOSDevice(), directSubscribeFirst: isIOSDevice()}});
+    const data = await registerPushSubscription({{preferCached: isIOSDevice(), sendTest: true}});
     const client = data && data.subscription && data.subscription.client ? data.subscription.client : 'устройство';
     showRouterMsg(`VPS принял подписку и отправил тестовый Web Push на ${{client}}.`);
     setNotifyStatus(`VPS принял подписку и отправил тестовый Web Push на ${{client}}.`);
@@ -12659,7 +12732,7 @@ button:hover{{filter:brightness(1.06)}}
       <form class="login" method="post" action="/login">
     {error_html}
     <span class="brand">
-      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v113</span></span></h1>
+      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v114</span></span></h1>
     </span>
     <label for="hubUsername">Логин</label>
     <input id="hubUsername" name="username" autocomplete="off" autofocus required>
@@ -13131,7 +13204,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;background:li
                 <circle cx="65" cy="59" r="3" fill="#E5F2FF"/>
               </svg>
             </div>
-            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v113</span></h2>
+            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v114</span></h2>
           </div>
         </div>
         <div class="brandBottom">
@@ -17604,6 +17677,19 @@ exit 127
                     client_ip,
                     user_agent,
                 )
+                if not bool(payload.get("push_test", True)):
+                    self.send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "delivery": "registered",
+                            "subscription": {
+                                "id": subscription.get("id"),
+                                "client": subscription.get("client"),
+                            },
+                        },
+                    )
+                    return
                 test_payload = {
                     "title": APP_NAME,
                     "body": "Push включён на этом устройстве.",
@@ -17632,7 +17718,7 @@ exit 127
                     ],
                     "ok" if result == "ok" else "partial",
                 )
-                if result == "gone":
+                if result in ("gone", "stale"):
                     remove_push_subscription(subscription.get("endpoint", ""))
                 if result != "ok":
                     self.send_json(503, {"ok": False, "error": push_result_message(result, subscription), "delivery": result, "subscription": {"id": subscription.get("id"), "client": subscription.get("client")}})

@@ -795,6 +795,26 @@ heartbeat_candidate_endpoints() {
 	esac
 }
 
+heartbeat_set_url_if_changed() {
+	local key next current ignored_file ignored
+	key="$1"
+	next="$2"
+	case "$next" in http://?*|https://?*) ;; *) return 1 ;; esac
+	current="$(uci_get "$key" '')"
+	case "$current|$next" in
+		https://*'|'http://*)
+			ignored_file="${TMPDIR:-/tmp}/owrt-remote-$key-ignored"
+			ignored="$current|$next"
+			if [ "$(cat "$ignored_file" 2>/dev/null)" != "$ignored" ]; then
+				log "heartbeat kept $key: current=$current proposed=$next reason=https-downgrade"
+				printf '%s' "$ignored" >"$ignored_file"
+			fi
+			return 1
+			;;
+	esac
+	uci_set_if_changed "$key" "$next"
+}
+
 heartbeat_apply_hub_update() {
 	local response_file fallback_base next_hub_url next_public_url next_vps_host changed old_vps_host mode ignored_file ignored
 	response_file="$1"
@@ -804,12 +824,15 @@ heartbeat_apply_hub_update() {
 	next_vps_host="$(json_extract_object_string "$response_file" hub_update vps_host)"
 	old_vps_host="$(uci_get vps_host '')"
 	mode="$(vps_host_mode)"
-	[ -n "$next_hub_url" ] || next_hub_url="$fallback_base"
+	# A fallback is a temporary transport, not a new configured Hub URL.
+	if [ -z "$next_hub_url" ] && [ -z "$(uci_get hub_url '')" ]; then
+		next_hub_url="$fallback_base"
+	fi
 	changed=0
-	if uci_set_if_changed hub_url "$next_hub_url"; then
+	if heartbeat_set_url_if_changed hub_url "$next_hub_url"; then
 		changed=1
 	fi
-	if uci_set_if_changed public_url "$next_public_url"; then
+	if heartbeat_set_url_if_changed public_url "$next_public_url"; then
 		changed=1
 	fi
 	if [ "$mode" = auto ]; then

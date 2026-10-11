@@ -1,4 +1,4 @@
-# Фиксация VPS host и независимое соединение Remote через WAN (v113)
+# Фиксация VPS host и независимое соединение Remote через WAN (v114)
 
 `vps_host_mode=manual` сохраняет заданный на роутере адрес. Это значение
 используется и когда опция отсутствует у старой установки. Только явно
@@ -12,11 +12,40 @@ Hub сохраняет прежнее поведение для старых а�
 при старой версии Hub. Для полного фикса сначала обновляется роутер.
 
 На роутере в настройках есть «Автоматически обновлять VPS host».
+Эта галочка относится только к адресу reverse-подключения Xray, не к Hub URL.
+При автоматическом изменении VPS host агент перезапускает Xray; в ручном
+режиме адрес подключения остаётся заданным пользователем.
 Блок «Настроить VPS host» убран из карточек Hub на ПК и мобильном.
 Он не появляется при периодическом обновлении карточек. Сам механизм
 ручного/автоматического режима и API применения адреса по SSH сохраняются.
 OpenWrt config / автоматическое переприменение конфигурации больше не
 удаляет всю UCI-секцию и сохраняет существующий ручной адрес и WAN-параметры.
+
+## Защита Hub URL от автоматического перехода HTTPS → HTTP
+
+Heartbeat больше не заменяет сохранённые HTTPS-адреса Hub URL и Public URL
+на HTTP из ответа сервера. Резервное подключение тоже не становится новым
+Hub URL, если адрес уже настроен. Отклонение видно в logread с причиной
+`https-downgrade`; одинаковые предложения не повторяются в журнале.
+Hub использует известный HTTPS для того же домена вместо старого HTTP
+при ответе heartbeat и формировании конфигурации. HTTPS на нестандартном
+порту и установки, работающие только по HTTP, сохраняются. Изменить схему
+вручную через настройки по-прежнему можно.
+
+Для этого локального исправления есть отдельная установка с резервными
+копиями файлов и конфигурации. `-HubUrl` явно возвращает адрес на роутере;
+VPS host и его автоматический режим эта установка не меняет.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-hub-url-fix.ps1" -Target Router -Machine "root@192.168.1.1" -HubUrl "https://owrt-zks95.developer.li" -Action Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-hub-url-fix.ps1" -Target Vps -Machine "root@193.233.82.38" -Action Install
+```
+
+Откат: те же команды с `-Action Rollback`, без `-HubUrl`. Резервные копии:
+`/root/owrt-remote-backup-before-hub-url-v114` на роутере и
+`/opt/owrt-remote/owrt-remote-hub.py.bak-before-hub-url-v114` на VPS.
+`HEARTBEAT_OK` подтверждает ответ Hub. Если файлы установлены, но Hub недоступен,
+скрипт отдельно сообщает `HEARTBEAT_FAILED`; это не подтверждение связи.
 
 ## Прямой WAN
 
@@ -96,21 +125,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.
 
 Установка загружает локальные файлы, без Git. До остановки службы проверяются
 доступность WAN и поддержка таблицы реальной командой ip на роутере.
-На роутер загружается и файл LuCI: версия v113 появляется и в основной
+На роутер загружается и файл LuCI: версия v114 появляется и в основной
 CGI-панели, и в странице входа в неё через LuCI.
 Сначала сохраняются файлы
 и конфигурация; после замены проверяется heartbeat/health. При ошибке
 автоматически восстанавливается состояние перед текущей попыткой.
 Сохранённая резервная копия для ручного отката не перезаписывается.
 
-* Роутер: `/root/owrt-remote-backup-before-host-policy-v113` — агент,
+* Роутер: `/root/owrt-remote-backup-before-host-policy-v114` — агент,
   helper, init, CGI, UCI-конфигурация и Xray-конфиг (в закрытом каталоге).
-* VPS: `/opt/owrt-remote/owrt-remote-hub.py.bak-before-host-policy-v113`.
+* VPS: `/opt/owrt-remote/owrt-remote-hub.py.bak-before-host-policy-v114`.
   База роутеров и настройки авторизации не заменяются.
 
-Успешная установка заканчивается `HOST_POLICY_ROUTER_V113_OK` на роутере
-и `HOST_POLICY_VPS_V113_Install_OK` на VPS. Старые резервные копии предыдущей
-версии сохраняются; новые команды отката используют отдельные копии для v113.
+Успешная установка заканчивается `HOST_POLICY_ROUTER_V114_OK` на роутере
+и `HOST_POLICY_VPS_V114_Install_OK` на VPS. Старые резервные копии предыдущей
+версии сохраняются; новые команды отката используют отдельные копии для v114.
 
 ### Переход с nftables-маркировки на адресную маршрутизацию
 
@@ -119,11 +148,11 @@ CGI-панели, и в странице входа в неё через LuCI.
 Обновление VPS для этого изменения не требуется.
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -PreserveConnectionSettings -BackupName "podkop-compat-v113" -Action Install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -BackupName "podkop-compat-v113" -Action Rollback
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -PreserveConnectionSettings -BackupName "podkop-compat-v114" -Action Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "vps\deploy-host-policy.ps1" -Target Router -Machine "root@192.168.2.1" -BackupName "podkop-compat-v114" -Action Rollback
 ```
 
-Копия: `/root/owrt-remote-backup-before-podkop-compat-v113`.
+Копия: `/root/owrt-remote-backup-before-podkop-compat-v114`.
 После установки повторите диагностику Podkop. Предупреждение от прежних правил
 Remote должно исчезнуть. Настоящие дополнительные правила других приложений
 по-прежнему обнаруживаются штатной диагностикой.

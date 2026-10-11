@@ -167,6 +167,33 @@ class HostPolicyTests(unittest.TestCase):
     def test_auto_heartbeat_retains_central_host(self):
         self.assertEqual(hub.canonical_router_hub_update(self.row("auto"))["vps_host"], "hub.example")
 
+    def test_stale_http_public_url_prefers_known_https_for_heartbeat_and_rebind(self):
+        for secure_source in ("app", "request", "status"):
+            with self.subTest(source=secure_source):
+                row = {"vps_host": "hub.example", "public_url": "http://hub.example:8088"}
+                app_url = "https://hub.example:9443" if secure_source == "app" else ""
+                request_url = "https://hub.example:9443" if secure_source == "request" else "http://hub.example:8088"
+                if secure_source == "status":
+                    row["status_json"] = json.dumps({"hub_url": "https://hub.example:9443"})
+                update = hub.canonical_router_hub_update(row, app_url, request_url)
+                bundle, url, _ = hub.router_current_hub_bundle(row, app_url, request_url)
+                self.assertEqual(update["hub_url"], "https://hub.example:9443")
+                self.assertEqual(update["public_url"], "https://hub.example:9443")
+                self.assertEqual(url, update["hub_url"])
+                self.assertEqual(bundle["public_url"], update["public_url"])
+
+    def test_hub_url_selection_preserves_http_only_and_custom_https_endpoints(self):
+        cases = (
+            ({"public_url": "http://hub.example"}, "", "http://hub.example:8088", "http://hub.example:8088"),
+            ({"public_url": "https://hub.example:9443"}, "https://hub.example", "http://hub.example:8088", "https://hub.example:9443"),
+            ({"public_url": "http://private.example:8088"}, "https://other.example", "", "http://private.example:8088"),
+        )
+        for row, app_url, request_url, expected in cases:
+            with self.subTest(expected=expected):
+                update = hub.canonical_router_hub_update(row, app_url, request_url)
+                self.assertEqual(update["hub_url"], expected)
+                self.assertEqual(hub.router_current_hub_bundle(row, app_url, request_url)[1], expected)
+
     def test_rebind_prefers_manual_reported_ip_over_public_hostname(self):
         bundle, url, host = hub.router_current_hub_bundle(self.row(), "https://hub.example")
         self.assertEqual(host, "193.233.82.38")
@@ -254,6 +281,54 @@ class RouterShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "hub.example")
         self.assertIn("old=193.233.82.38 new=hub.example reason=hub_update mode=auto", result.stderr)
+
+    def test_heartbeat_never_downgrades_configured_https_in_manual_or_auto_mode(self):
+        (self.directory / "response").write_text(json.dumps({"hub_update": {
+            "hub_url": "http://hub.example", "public_url": "http://hub.example",
+        }}), encoding="utf-8")
+        for mode in ("manual", "auto"):
+            with self.subTest(mode=mode):
+                self.config(vps_host_mode=mode, vps_host="193.233.82.38",
+                            hub_url="https://hub.example:9443", public_url="https://hub.example:9443")
+                result = self.run_shell('''
+heartbeat_apply_hub_update "$TEST_ROOT/response" http://hub.example:8088
+heartbeat_apply_hub_update "$TEST_ROOT/response" http://hub.example:8088
+printf '%s|%s|%s' "$(uci_get hub_url '')" "$(uci_get public_url '')" "$(uci_get vps_host '')"
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "https://hub.example:9443|https://hub.example:9443|193.233.82.38")
+        self.assertFalse((self.directory / "commits").exists())
+        log = (self.directory / "log").read_text()
+        self.assertEqual(log.count("reason=https-downgrade"), 2, "repeated proposals must not flood the log")
+
+    def test_successful_fallback_heartbeat_does_not_replace_configured_hub_url(self):
+        self.config(hub_url="https://hub.example", hub_token="test-token", vps_host="193.233.82.38")
+        result = self.run_shell('''
+heartbeat_json() { printf '{"id":"test-router"}'; }
+post_json() {
+    case "$1" in
+        http://193.233.82.38:8088/api/heartbeat) printf '{"ok":true}' ;;
+        *) return 1 ;;
+    esac
+}
+send_heartbeat >/dev/null || exit
+printf '%s' "$(uci_get hub_url '')"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "https://hub.example")
+        self.assertFalse((self.directory / "commits").exists())
+
+    def test_heartbeat_still_upgrades_http_and_supports_http_only_installations(self):
+        for current, proposed in (("http://hub.example:8088", "https://hub.example:9443"),
+                                  ("http://old.example:8088", "http://new.example:8088")):
+            with self.subTest(proposed=proposed):
+                self.config(hub_url=current, public_url=current)
+                (self.directory / "response").write_text(json.dumps({"hub_update": {
+                    "hub_url": proposed, "public_url": proposed,
+                }}), encoding="utf-8")
+                result = self.run_shell('heartbeat_apply_hub_update "$TEST_ROOT/response" http://fallback.example; printf "%s|%s" "$(uci_get hub_url \'\')" "$(uci_get public_url \'\')"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f"{proposed}|{proposed}")
 
     def test_hub_generated_rebind_preserves_manual_ip_and_wan_options(self):
         self.config(vps_host="193.233.82.38", wan_direct="1", wan_dns="9.9.9.9", wan_interface="internet")
