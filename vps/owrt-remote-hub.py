@@ -11199,9 +11199,17 @@ authForm.addEventListener('submit', async (ev) => {{
   const form = ev.currentTarget;
   setAuthMessage('');
   const body = new URLSearchParams(new FormData(form));
+  const passwordChanged = !!body.get('password');
   const res = await fetch('/api/auth', {{method: 'POST', body}});
   const text = await res.text();
   if (res.ok) {{
+    if (passwordChanged || res.headers?.get('X-Hub-Reauth') === '1') {{
+      setOwnerPasswordRememberEnabled(false);
+      form.password.value = '';
+      form.password_confirm.value = '';
+      window.location.replace('/login');
+      return;
+    }}
     const nextCurrentPassword = form.password.value ? String(form.password.value || '') : String(form.current_password.value || '');
     if (ownerPasswordRememberEnabled()) setOwnerPasswordRememberEnabled(true, nextCurrentPassword);
     setAuthMessage(text || 'Доступ обновлен');
@@ -14828,30 +14836,6 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
         self.send_bytes(401, login_html(error_text or "РќРµРІРµСЂРЅС‹Р№ Р»РѕРіРёРЅ РёР»Рё РїР°СЂРѕР»СЊ").encode("utf-8"), "text/html; charset=utf-8")
 
     def update_auth(self):
-        payload = self.read_payload()
-        auth = load_auth()
-        current_password = payload.get("current_password", "")
-        if not verify_login(auth.get("username", ""), current_password):
-            self.send_text(403, "Текущий пароль неверный")
-            return
-        username = payload.get("username", auth.get("username", "admin"))
-        new_password = payload.get("password", "")
-        confirm = payload.get("password_confirm", "")
-        if new_password:
-            if new_password != confirm:
-                self.send_text(400, "Новый пароль и повтор не совпадают")
-                return
-            if len(new_password) < MIN_PASSWORD_LENGTH:
-                self.send_text(400, f"Новый пароль должен быть минимум {MIN_PASSWORD_LENGTH} символа")
-                return
-            save_auth(username, new_password)
-        else:
-            clean = clean_username(username)
-            auth["username"] = clean
-            save_auth_state(auth)
-        self.send_text(200, "Доступ к Hub обновлен")
-
-    def update_auth(self):
         payload = self.read_payload(keep_blank_values=True)
         auth = normalize_auth_state(load_auth())
         current_password = payload.get("current_password", "")
@@ -14901,6 +14885,18 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
         )
         auth["updated_at"] = now_ts()
         save_auth_state(auth)
+        if new_password:
+            revoke_hub_session(token=self.current_session_token())
+            if self.legacy_admin_ok():
+                token = secrets.token_urlsafe(32)
+                atomic_write_text(SESSION_TOKEN_FILE, token + "\n", mode=0o600)
+                self.app.session_token = token
+            self.send_bytes(
+                200,
+                "Доступ к Hub обновлен".encode("utf-8"),
+                extra_headers=[("Set-Cookie", self.clear_session_cookie()), ("X-Hub-Reauth", "1")],
+            )
+            return
         self.send_text(200, "Доступ к Hub обновлен")
 
     def build_auth_meta(self):
