@@ -12,7 +12,7 @@ log() {
 }
 
 die() {
-	printf 'ОШИБКА: %s\n' "$*" >&2
+	log "ОШИБКА: $*"
 	exit 1
 }
 
@@ -559,7 +559,7 @@ render_client_config() {
 	cat >"$out" <<EOF
 {
   "log": {
-    "loglevel": "warning"
+    "loglevel": "info"
   },
   "inbounds": [],
   "outbounds": [
@@ -859,7 +859,7 @@ heartbeat_apply_hub_update() {
 }
 
 send_heartbeat() {
-	local hub_url token endpoint tmp response event used fallback_base
+	local hub_url token endpoint tmp response event used fallback_base errors rc
 	event="${1:-}"
 	hub_url="$(uci_get hub_url '')"
 	token="$(uci_get hub_token '')"
@@ -867,30 +867,35 @@ send_heartbeat() {
 	[ -n "$token" ] || die "hub_token пустой"
 	if truthy "$(uci_get wan_direct 0)"; then
 		command -v wan_prepare >/dev/null 2>&1 || die "WAN helper missing: $WAN_HELPER"
-		wan_prepare || return 1
+		wan_prepare || { log 'Heartbeat: не удалось подготовить прямой WAN'; return 1; }
 		wan_reconcile_xray
 	fi
 
 	endpoint="${hub_url%/}/api/heartbeat"
 	tmp="${TMPDIR:-/tmp}/owrt-remote-heartbeat.$$"
 	response="${TMPDIR:-/tmp}/owrt-remote-heartbeat.response.$$"
+	errors="$response.error"
 	heartbeat_json "$event" >"$tmp"
 	used=0
 	for endpoint in $(heartbeat_candidate_endpoints); do
 		used=1
-		if post_json "$endpoint" "$token" "$tmp" >"$response" \
-			&& grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
+		rc=0
+		post_json "$endpoint" "$token" "$tmp" >"$response" 2>"$errors" || rc=$?
+		if [ "$rc" = 0 ] && grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
 			fallback_base="$(heartbeat_base_from_endpoint "$endpoint")"
 			if ! heartbeat_apply_hub_update "$response" "$fallback_base"; then
-				rm -f "$tmp" "$response"
+				log 'Heartbeat: Hub ответил, но обновление настроек не применилось'
+				rm -f "$tmp" "$response" "$errors"
 				return 1
 			fi
 			cat "$response"
-			rm -f "$tmp" "$response"
+			log "Heartbeat: OK; Hub=$fallback_base; WAN_direct=$(uci_get wan_direct 0); WAN_active=$(cat "$WAN_STATE/active-interface" 2>/dev/null)"
+			rm -f "$tmp" "$response" "$errors"
 			return 0
 		fi
+		log "Heartbeat: ошибка; endpoint=$endpoint; rc=$rc; $(head -c 1024 "$errors"); ответ=$(head -c 1024 "$response")"
 	done
-	rm -f "$tmp" "$response"
+	rm -f "$tmp" "$response" "$errors"
 	[ "$used" = "1" ] || die "hub_url/public_url/vps_host пустые"
 	return 1
 }
@@ -969,6 +974,7 @@ heartbeat_loop() {
 	local interval
 	interval="$(safe_num "$(uci_get heartbeat_interval 30)" 30)"
 	[ "$interval" -lt 10 ] && interval=10
+	log "Heartbeat: цикл запущен; интервал=${interval}s"
 	while :; do
 		if send_heartbeat >/dev/null 2>&1; then
 			heartbeat_mark_ok
@@ -1227,6 +1233,7 @@ run_xray() {
 	xray_config="$(render_client_config)" || die "cannot create Xray configuration"
 	[ -n "$xray_config" ] && [ -s "$xray_config" ] || die "Xray configuration is missing or empty"
 	[ -x "$xray_bin" ] || die "xray not found or not executable: $xray_bin"
+	log "Xray: запуск туннеля; config=$xray_config; VPS=$(uci_get vps_host ''):$(uci_get vps_port 8443); WAN_direct=$(uci_get wan_direct 0); WAN_selected=$(uci_get wan_interface wan)"
 
 	if "$xray_bin" help 2>/dev/null | grep -q 'run'; then
 		exec "$xray_bin" run -config "$xray_config"

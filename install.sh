@@ -216,6 +216,8 @@ install_xray_runtime() {
 
 install_file "usr/sbin/owrt-remote" 0755
 install_file "usr/lib/owrt-remote/wan.sh" 0644
+install_file "usr/lib/owrt-remote/logs.sh" 0644
+install_file "etc/init.d/owrt-remote-logs" 0755
 install_file "etc/init.d/owrt-remote" 0755
 install_file "etc/hotplug.d/iface/99-owrt-remote" 0755
 install_config
@@ -225,6 +227,11 @@ install_file "usr/share/rpcd/acl.d/luci-app-owrt-remote.json" 0644
 install_file "www/luci-static/resources/view/owrt_remote.js" 0644
 
 ensure_wol_support
+
+if [ "${ROOT%/}" = "" ]; then
+	/etc/init.d/owrt-remote-logs enable
+	/etc/init.d/owrt-remote-logs restart
+fi
 
 rm -f "$(target_path usr/lib/lua/luci/controller/owrt_remote.lua)" 2>/dev/null || true
 rm -rf "$(target_path tmp/luci-indexcache)" "$(target_path tmp/luci-modulecache)" "$(target_path tmp/luci-indexcache.)"* "$(target_path tmp/luci-modulecache.)"* 2>/dev/null || true

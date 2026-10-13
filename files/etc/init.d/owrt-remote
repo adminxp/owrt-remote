@@ -54,6 +54,10 @@ stop_xray_processes() {
 
 start_service() {
 	mkdir -p /var/lock /var/run /tmp/owrt-xray
+	if [ -x /etc/init.d/owrt-remote-logs ]; then
+		/etc/init.d/owrt-remote-logs start >/dev/null 2>&1 || true
+	fi
+	logger -t owrt-remote 'Сервис: запуск' 2>/dev/null || true
 
 	if ! config_enabled; then
 		echo "owrt-remote disabled in /etc/config/owrtremote"
@@ -81,6 +85,7 @@ reload_service() {
 }
 
 stop_service() {
+	logger -t owrt-remote 'Сервис: остановка туннеля' 2>/dev/null || true
 	stop_xray_processes
 	/usr/sbin/owrt-remote wan-cleanup >/dev/null 2>&1 || true
 }

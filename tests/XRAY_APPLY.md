@@ -1,4 +1,4 @@
-# Применение OpenWrt config через панель роутера (v114)
+# Применение OpenWrt config через панель роутера (v115)
 
 При отправке textarea браузер кодирует переносы строк как CRLF. CGI
 декодировал их без нормализации и записывал CR в исполняемый shell-скрипт.
@@ -22,7 +22,7 @@ CRLF и LF, heredoc, пустые строки, кодированные сим�
 
 Скрипт обновляет только CGI на роутере. VPS обновлять для этого фикса
 не требуется. До замены сохраняется первая резервная копия CGI:
-`/root/owrt-remote-backup-before-xray-apply-v114/owrt-remote`.
+`/root/owrt-remote-backup-before-xray-apply-v115/owrt-remote`.
 
 Из PowerShell Windows 11; замените IP, если адрес роутера отличается:
 
@@ -53,7 +53,7 @@ python tests/test_xray_apply.py -v
 
 Переносы строк в формах описаны в [стандарте HTML](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html).
 
-## Мобильная вставка команд (локальный фикс v114)
+## Мобильная вставка команд (локальный фикс v115)
 
 Воспроизведён отдельный случай `rc=255`: в строке
 `uci set owrtremote.main.router_name=‘Дом у моря’` типографские кавычки
@@ -77,7 +77,7 @@ python tests/test_xray_apply.py -v
 
 Обновляется только `/www/cgi-bin/owrt-remote` на роутере, без перезапуска
 служб и изменений настроек при установке. Резервная копия отдельная:
-`/root/owrt-remote-backup-before-xray-mobile-v114/owrt-remote`.
+`/root/owrt-remote-backup-before-xray-mobile-v115/owrt-remote`.
 
 Установка из PowerShell Windows 11:
 

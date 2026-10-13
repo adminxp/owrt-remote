@@ -18,8 +18,16 @@ if [ -x "$(target_path etc/init.d/owrt-remote)" ]; then
 	"$(target_path etc/init.d/owrt-remote)" disable >/dev/null 2>&1 || true
 fi
 
+if [ -x "$(target_path etc/init.d/owrt-remote-logs)" ]; then
+	"$(target_path etc/init.d/owrt-remote-logs)" stop >/dev/null 2>&1 || true
+	"$(target_path etc/init.d/owrt-remote-logs)" disable >/dev/null 2>&1 || true
+fi
+
 rmf usr/sbin/owrt-remote
 rmf usr/lib/owrt-remote/wan.sh
+rmf usr/lib/owrt-remote/logs.sh
+rmf etc/init.d/owrt-remote-logs
+rm -rf "$(target_path tmp/owrt-remote-logs)"
 rmdir "$(target_path usr/lib/owrt-remote)" 2>/dev/null || true
 rmf etc/init.d/owrt-remote
 rmf www/cgi-bin/owrt-remote
