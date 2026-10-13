@@ -247,8 +247,42 @@ wan_remove_legacy_firewall() {
 	fi
 }
 
+wan_table_names() {
+	local file
+	printf '%s\n' "$WAN_TABLE"
+	for file in /etc/iproute2/rt_tables /usr/lib/iproute2/rt_tables /etc/iproute2/rt_tables.d/*.conf /usr/lib/iproute2/rt_tables.d/*.conf; do
+		[ ! -r "$file" ] || awk -v table="$WAN_TABLE" '$1 == table && NF >= 2 { print $2 }' "$file"
+	done
+}
+
+wan_table_routes() {
+	local family routes error names
+	family="$1"; error="$WAN_STATE/table-error.$$"
+	if routes="$(ip -"$family" route show table "$WAN_TABLE" 2>"$error")"; then
+		printf '%s\n' "$routes"
+	elif [ -z "$routes" ] && grep -qi 'FIB table does not exist' "$error"; then
+		# iproute2 explicitly identifies an absent, not-yet-created table.
+		:
+	elif [ -z "$routes" ] && grep -Eqi '^[[:space:]]*([[:alnum:]_-]+: )?Dump terminated[[:space:]]*$' "$error"; then
+		# Some OpenWrt ip builds report only "Dump terminated" for this case.
+		# Confirm it with a successful dump of all tables; never assume that a
+		# failed/partial dump means an empty table, or overwrite foreign routes.
+		if ! routes="$(ip -"$family" route show table all 2>"$error")"; then
+			cat "$error" >&2; rm -f "$error"; return 1
+		fi
+		names="$(wan_table_names)"
+		printf '%s\n' "$routes" | awk -v names="$names" '
+			BEGIN { n=split(names, a, "\n"); for(i=1;i<=n;i++) tables[a[i]]=1 }
+			{ for(i=1;i<NF;i++) if($i=="table" && tables[$(i+1)]) { print; break } }
+		'
+	else
+		cat "$error" >&2; rm -f "$error"; return 1
+	fi
+	rm -f "$error"
+}
+
 wan_check_table() {
-	local family rules routes own error
+	local family rules routes own
 	family="$1"
 	rules="$(ip -"$family" rule show)" || return 1
 	own="$(wan_owned_rule_pattern)"
@@ -256,14 +290,7 @@ wan_check_table() {
 	if printf '%s\n' "$rules" | grep -E "^$WAN_PRIORITY:|lookup $WAN_TABLE([[:space:]]|$)" | grep -Ev "$own" | grep -q .; then
 		log "WAN IPv$family table $WAN_TABLE or priority $WAN_PRIORITY is already used by another rule"; return 1
 	fi
-	error="$WAN_STATE/table-error.$$"
-	if ! routes="$(ip -"$family" route show table "$WAN_TABLE" 2>"$error")"; then
-		# iproute2 returns an error for an empty, not-yet-created table.
-		if ! grep -qi 'FIB table does not exist' "$error"; then
-			cat "$error" >&2; rm -f "$error"; return 1
-		fi
-	fi
-	rm -f "$error"
+	routes="$(wan_table_routes "$family")" || return 1
 	if [ -n "$routes" ] && [ ! -f "$WAN_STATE/route-owner-$family" ] && ! printf '%s\n' "$rules" | grep -Eq "$own"; then
 		log "WAN IPv$family table $WAN_TABLE is not empty and does not belong to Remote"; return 1
 	fi

@@ -115,8 +115,16 @@ ip() {
                 priority) echo '104: from all fwmark 0x10000 lookup 105' ;;
             esac ;;
         '-4 route show table 210')
+            case "${TABLE_QUERY_ERROR:-}" in
+                busybox) echo 'Dump terminated' >&2; return 2 ;;
+                denied) echo 'RTNETLINK answers: Operation not permitted' >&2; return 2 ;;
+            esac
             if [ "${TABLE_MISSING:-0}" = 1 ]; then echo 'Error: ipv4: FIB table does not exist.' >&2; return 2; fi
             [ "${TABLE_CONFLICT:-}" != route ] || echo 'default via 192.0.2.1 dev other-wan' ;;
+        '-4 route show table all')
+            [ "${ALL_TABLES_FAIL:-0}" = 0 ] || { echo 'Dump terminated' >&2; return 2; }
+            echo 'default via 10.0.0.1 dev pppoe-wan table main'
+            [ "${ALL_TABLES_FOREIGN:-0}" = 0 ] || echo "default via 192.0.2.1 dev other-wan table ${ALL_TABLES_NAME:-210}" ;;
     esac
     return 0
 }
@@ -425,6 +433,59 @@ printf '%s' "$(uci_get hub_url '')"
         self.assertIn("<--post301>", args)
         self.assertIn("<--post302>", args)
         self.assertIn("<--post303>", args)
+
+    def test_busybox_empty_table_is_confirmed_before_wan_start(self):
+        self.config(vps_host="193.233.82.38", hub_url="https://hub.example", wan_direct="1", vless_uuid="test-uuid")
+        result = self.run_shell('render_client_config --stdout', TABLE_QUERY_ERROR="busybox")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)
+        self.assertEqual(config["outbounds"][2]["settings"]["address"], "193.233.82.38")
+        routes = self.directory.joinpath("ip").read_text()
+        self.assertIn("-4 route show table all", routes)
+        self.assertIn("-4 route replace default", routes)
+        self.assertEqual(self.directory.joinpath("owrt-remote-wan/active-interface").read_text().strip(), "wan")
+
+    def test_table_dump_error_does_not_hide_foreign_routes_or_read_failures(self):
+        self.config(vps_host="193.233.82.38")
+        for settings in ({"TABLE_QUERY_ERROR": "busybox", "ALL_TABLES_FOREIGN": "1"},
+                         {"TABLE_QUERY_ERROR": "busybox", "ALL_TABLES_FAIL": "1"},
+                         {"TABLE_QUERY_ERROR": "denied"}):
+            with self.subTest(settings=settings):
+                result = self.run_shell('wan_prepare', **settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("route replace", self.directory.joinpath("ip").read_text())
+
+    def test_table_dump_fallback_recognizes_named_foreign_table(self):
+        self.config(vps_host="193.233.82.38")
+        result = self.run_shell('''
+wan_table_names() { printf '210\nremote_named\n'; }
+wan_prepare
+''', TABLE_QUERY_ERROR="busybox", ALL_TABLES_FOREIGN="1", ALL_TABLES_NAME="remote_named")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not belong to Remote", result.stderr)
+        self.assertNotIn("route replace", self.directory.joinpath("ip").read_text())
+
+    def test_xray_is_not_executed_with_a_failed_or_empty_configuration(self):
+        executable = self.directory / "fake-xray"
+        executable.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$TEST_ROOT/xray-called"\n', encoding="utf-8", newline="\n")
+        executable.chmod(0o755)
+        self.config(enabled="1", xray_bin=executable.as_posix())
+        for render in ('return 7', 'return 0', 'printf "%s" "$TEST_ROOT/missing-config"'):
+            with self.subTest(render=render):
+                result = self.run_shell('ensure_xray_available_with_retry() { return 0; }; render_client_config() { ' + render + '; }; run_xray')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.directory.joinpath("xray-called").exists())
+
+    def test_xray_runs_with_the_successfully_rendered_configuration(self):
+        executable = self.directory / "fake-xray"
+        executable.write_text('#!/bin/sh\n[ "$1" != help ] || { echo run; exit; }; printf "%s\\n" "$*" >"$TEST_ROOT/xray-called"\n', encoding="utf-8", newline="\n")
+        executable.chmod(0o755)
+        config = self.directory / "valid-config.json"
+        config.write_text('{"outbounds": []}')
+        self.config(enabled="1", xray_bin=executable.as_posix())
+        result = self.run_shell('ensure_xray_available_with_retry() { return 0; }; render_client_config() { printf "%s" "$TEST_ROOT/valid-config.json"; }; run_xray')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.directory.joinpath("xray-called").read_text().strip(), 'run -config ' + config.as_posix())
 
     def test_plain_http_heartbeat_accepts_json_after_redirect_follow(self):
         self.config(vps_host="193.233.82.38", vps_host_mode="manual")

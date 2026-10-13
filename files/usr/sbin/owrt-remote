@@ -654,7 +654,8 @@ run_xray() {
 
 	ensure_xray_available
 	xray_bin="$(xray_bin_path)"
-	xray_config="$(render_client_config)"
+	xray_config="$(render_client_config)" || die "не удалось создать конфигурацию Xray"
+	[ -n "$xray_config" ] && [ -s "$xray_config" ] || die "конфигурация Xray отсутствует или пуста"
 	[ -x "$xray_bin" ] || die "xray не найден или не исполняемый: $xray_bin"
 
 	if "$xray_bin" help 2>/dev/null | grep -q 'run'; then
@@ -1223,7 +1224,8 @@ run_xray() {
 
 	ensure_xray_available_with_retry || die "cannot prepare Xray for tunnel"
 	xray_bin="$(xray_bin_path)"
-	xray_config="$(render_client_config)"
+	xray_config="$(render_client_config)" || die "cannot create Xray configuration"
+	[ -n "$xray_config" ] && [ -s "$xray_config" ] || die "Xray configuration is missing or empty"
 	[ -x "$xray_bin" ] || die "xray not found or not executable: $xray_bin"
 
 	if "$xray_bin" help 2>/dev/null | grep -q 'run'; then
