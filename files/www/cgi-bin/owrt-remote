@@ -8,6 +8,7 @@ RESULT_TITLE=""
 RESULT_BODY=""
 RESULT_KIND="info"
 SHOW_XRAY_SETTINGS="0"
+XRAY_SETTINGS_DRAFT=""
 
 cleanup() {
 	rm -f "$PARAMS_FILE"
@@ -172,11 +173,58 @@ clear_config() {
 	set_result "Конфигурация очищена" "Поля VPS, Xray, LuCI и SSH очищены. Router ID и название оставлены." "warn"
 }
 
+normalize_xray_settings() {
+	# Only repair mobile typography around a complete UCI assignment. Values
+	# already enclosed in shell quotes (including names/tokens) stay unchanged.
+	LC_ALL=C awk '
+		function shell_quote(value, result, i, char) {
+			result = "\047"
+			for (i = 1; i <= length(value); i++) {
+				char = substr(value, i, 1)
+				result = result (char == "\047" ? "\047\042\047\042\047" : char)
+			}
+			return result "\047"
+		}
+		function scan_quotes(line, i, char) {
+			for (i = 1; i <= length(line); i++) {
+				char = substr(line, i, 1)
+				if (quote != "\047" && char == "\\") { i++; continue }
+				if (!quote && char == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;]/)) break
+				if (char == quote) quote = ""
+				else if (!quote && (char == "\047" || char == "\042")) quote = char
+			}
+		}
+		NR == 1 { sub(/^\357\273\277/, "") }
+		{
+			line = $0
+			# Arbitrary shell input may contain a heredoc or multiline string.
+			# Preserve it verbatim instead of interpreting payload as commands.
+			if (index(line, "<<")) literal = 1
+			position = index(line, "=")
+			prefix = substr(line, 1, position)
+			gsub(/\302\240|\342\200\257/, " ", prefix)
+			if (!quote && !literal && !continued && position && prefix ~ /^[ \t]*uci[ \t]+(-q[ \t]+)?set[ \t]+owrtremote\.main(\.[a-zA-Z0-9_]+)?=$/) {
+				value = substr(line, position + 1)
+				sub(/[ \t]+$/, "", value)
+				if (value ~ /^\342\200\230.*\342\200\231$/ || value ~ /^\342\200\234.*\342\200\235$/) {
+					line = prefix shell_quote(substr(value, 4, length(value) - 6))
+				} else {
+					line = prefix substr(line, position + 1)
+				}
+			}
+			print line
+			scan_quotes(line)
+			continued = (line ~ /\\$/)
+		}
+	'
+}
+
 apply_xray_settings() {
 	local script script_file output rc
 	# HTML textarea POSTs use CRLF, even when the copied Hub commands use LF.
 	# BusyBox ash treats the trailing CR as part of keywords such as then/fi.
-	script="$(param xray_settings_script | tr -d '\r')"
+	XRAY_SETTINGS_DRAFT="$(param xray_settings_script | tr -d '\r')"
+	script="$(printf '%s\n' "$XRAY_SETTINGS_DRAFT" | normalize_xray_settings)"
 	output="${TMPDIR:-/tmp}/owrt-remote-apply.$$"
 	script_file="${TMPDIR:-/tmp}/owrt-remote-apply-script.$$"
 	rc=0
@@ -206,11 +254,13 @@ rc=$rc" "bad"
 	fi
 
 	if sh -e "$script_file" >"$output" 2>&1; then
+		XRAY_SETTINGS_DRAFT=""
 		set_result "Xray настройки применены" "$(cat "$output")" "ok"
 	else
 		rc=$?
 		set_result "Ошибка применения Xray настроек" "$(cat "$output")
-rc=$rc" "bad"
+rc=$rc
+Вставленные команды сохранены в поле ниже. Проверь полный блок OpenWrt config: каждая команда должна быть на отдельной строке." "bad"
 	fi
 	rm -f "$script_file" "$output"
 }
@@ -475,11 +525,11 @@ EOF
         <p class="helperText">Вставь сюда блок команд из OpenWrt config на VPS. Роутер сам применит UCI, пересоберет Xray config, включит сервис и отправит heartbeat.</p>
         <form method="post">
           <input type="hidden" name="key" value="$(h "$key")">
-          <textarea class="scriptBox" name="xray_settings_script" spellcheck="false" placeholder="uci -q delete owrtremote.main
+          <textarea class="scriptBox" name="xray_settings_script" wrap="soft" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" placeholder="uci -q delete owrtremote.main
 uci set owrtremote.main=remote
 uci set owrtremote.main.enabled='1'
 ...
-owrt-remote heartbeat"></textarea>
+owrt-remote heartbeat">$(h "$XRAY_SETTINGS_DRAFT")</textarea>
           <div class="actions">
             <button class="btn good" name="action" value="apply_xray_settings">Применить настройки</button>
             <button class="btn" name="action" value="show_xray_settings">Очистить поле</button>

@@ -41,6 +41,15 @@ class XrayApplyPostTests(unittest.TestCase):
             '#!/bin/sh\n[ "$1" != render-client ] || [ "${RENDER_FAIL:-0}" = 0 ] || exit 7\n'
             'printf "%s\\n" "$*" >>"$TEST_ROOT/operations"\n', encoding="utf-8", newline="\n")
         tools.joinpath("owrt-remote").chmod(0o755)
+        tools.joinpath("uci").write_text(
+            '#!/bin/sh\n[ "$1" != -q ] || shift\n'
+            '[ "$#" = 2 ] || exit 255\n'
+            'case "$1" in\n'
+            '  get) exit 1 ;;\n'
+            '  set) printf "%s\\n" "$2" >>"$TEST_ROOT/uci-values" ;;\n'
+            '  commit) printf "commit\\n" >>"$TEST_ROOT/operations" ;;\n'
+            '  *) exit 255 ;;\nesac\n', encoding="utf-8", newline="\n")
+        tools.joinpath("uci").chmod(0o755)
         self.env = {**os.environ, "TMPDIR": self.directory.as_posix(),
                     "TEST_ROOT": self.directory.as_posix(), "KEY_FILE": (self.directory / "key").as_posix(),
                     "TEST_STRICT_SH": Path(STRICT_SH).as_posix()}
@@ -59,19 +68,80 @@ sh() {
     fi
     "$TEST_STRICT_SH" "$@"
 }
-render_page() { printf 'KIND=%s\nTITLE=%s\nBODY=%s\n' "$RESULT_KIND" "$RESULT_TITLE" "$RESULT_BODY"; }
+render_page() { printf 'KIND=%s\nTITLE=%s\nBODY=%s\nDRAFT=%s\n' "$RESULT_KIND" "$RESULT_TITLE" "$RESULT_BODY" "$XRAY_SETTINGS_DRAFT"; }
 '''
         self.cgi = self.directory / "cgi"
         self.cgi.write_text(cgi.replace("\nread_request\n", mocks + "\nread_request\n", 1), encoding="utf-8", newline="\n")
+        self.render_cgi = self.directory / "render-cgi"
+        template = cgi.split('\tif [ "$SHOW_XRAY_SETTINGS" = "1" ]; then\n', 1)[1].split('\n\tfi\n', 1)[0]
+        render = '\nrender_page() {\nkey="$(param key)"\n' + template + '\n}\n'
+        self.render_cgi.write_text(cgi.replace("\nread_request\n", render + "\nread_request\n", 1), encoding="utf-8", newline="\n")
 
-    def post(self, script, key="test-web-key"):
-        body = urlencode({"key": key, "action": "apply_xray_settings", "xray_settings_script": script}).encode("ascii")
-        result = subprocess.run([SH, self.cgi.as_posix()], input=body, capture_output=True,
+    def post(self, script, key="test-web-key", render=False, action="apply_xray_settings"):
+        body = urlencode({"key": key, "action": action, "xray_settings_script": script}).encode("ascii")
+        result = subprocess.run([SH, (self.render_cgi if render else self.cgi).as_posix()], input=body, capture_output=True,
                                 env={**self.env, "REQUEST_METHOD": "POST", "CONTENT_TYPE": "application/x-www-form-urlencoded",
                                      "CONTENT_LENGTH": str(len(body))}, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
         self.assertFalse(list(self.directory.glob("owrt-remote-*")), "CGI temporary files must be removed")
         return result.stdout.decode("utf-8")
+
+    def test_mobile_smart_quotes_reproduce_uci_255_and_are_repaired(self):
+        script = 'uci set owrtremote.main.router_name=‘Дом у моря’\nuci commit owrtremote\n'
+        # UCI returns 255 for too many arguments; shell syntax validation alone
+        # accepts these typography quotes and splits the name into three words.
+        broken = self.directory / "broken.sh"
+        broken.write_text(script, encoding="utf-8", newline="\n")
+        result = subprocess.run([STRICT_SH, "-e", broken.as_posix()], env=self.env, capture_output=True)
+        self.assertEqual(result.returncode, 255)
+        response = self.post(script.replace("\n", "\r\n"))
+        self.assertIn("KIND=ok", response)
+        self.assertEqual(self.directory.joinpath("uci-values").read_text(encoding="utf-8"),
+                         "owrtremote.main.router_name=Дом у моря\n")
+
+    def test_mobile_quotes_bom_and_nonbreaking_separators(self):
+        script = '\ufeffuci\u00a0-q\u202fset\u00a0owrtremote.main.router_name=“Папа\'s $HOME `id` & дом”\r\n'
+        self.assertIn("KIND=ok", self.post(script))
+        self.assertEqual(self.directory.joinpath("uci-values").read_text(encoding="utf-8"),
+                         "owrtremote.main.router_name=Папа's $HOME `id` & дом\n")
+
+    def test_ascii_shell_quotes_preserve_unicode_values(self):
+        value = "Дом ‘у моря’\u00a0— “офис”\u202f+ 100% & $HOME `id`"
+        script = "uci set owrtremote.main.router_name='" + value + "'\n"
+        self.assertIn("KIND=ok", self.post(script))
+        self.assertEqual(self.directory.joinpath("uci-values").read_text(encoding="utf-8"),
+                         "owrtremote.main.router_name=" + value + "\n")
+        self.assertEqual(self.directory.joinpath("executed.sh").read_text(encoding="utf-8"),
+                         "#!/bin/sh\n" + script)
+
+    def test_genuine_uci_error_is_not_reported_as_success_and_keeps_draft(self):
+        script = 'uci set owrtremote.main.router_name=broken name\nuci commit owrtremote\n'
+        response = self.post(script)
+        self.assertIn("KIND=bad", response)
+        self.assertIn("rc=255", response)
+        self.assertIn("DRAFT=" + script.rstrip("\n"), response)
+        self.assertFalse(self.directory.joinpath("operations").exists())
+
+    def test_mobile_form_disables_text_rewriting_and_escapes_failed_draft(self):
+        # Render the actual CGI textarea template on an unsuccessful POST.
+        script = "printf '%s' '</textarea><script>bad</script>&'\nexit 255\n"
+        response = self.post(script, render=True)
+        self.assertIn('autocorrect="off" autocapitalize="off" autocomplete="off"', response)
+        self.assertIn('wrap="soft" spellcheck="false"', response)
+        self.assertIn("&lt;/textarea&gt;&lt;script&gt;bad&lt;/script&gt;&amp;", response)
+        self.assertNotIn("</textarea><script>bad</script>", response)
+        cleared = self.post(script, render=True, action="show_xray_settings")
+        self.assertNotIn("&lt;script&gt;bad&lt;/script&gt;", cleared)
+
+    def test_uci_looking_lines_in_multiline_values_and_heredocs_stay_literal(self):
+        value = 'before\nuci set owrtremote.main.router_name=‘Дом у моря’\nafter\n'
+        for script in ("printf '%s' '" + value + "' >\"$TEST_ROOT/literal\"\n",
+                       'cat >"$TEST_ROOT/literal" <<\'EOF\'\n' + value + 'EOF\n'):
+            with self.subTest(script=script):
+                self.assertIn("KIND=ok", self.post(script))
+                self.assertEqual(self.directory.joinpath("executed.sh").read_bytes(),
+                                 ("#!/bin/sh\n" + script).encode("utf-8"))
+                self.assertFalse(self.directory.joinpath("uci-values").exists())
 
     def test_form_crlf_is_normalized_before_strict_shell_parsing(self):
         script = "if [ x = x ]; then\n  printf '%s' 'name + percent% & quote\"'\nfi\n"
