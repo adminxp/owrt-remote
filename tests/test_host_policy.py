@@ -268,7 +268,7 @@ class RouterShellTests(unittest.TestCase):
         (self.directory / "uci").write_text("".join(f"owrtremote.main.{key}={value}\n" for key, value in kwargs.items()), encoding="utf-8")
 
     def run_shell(self, commands, **env):
-        return subprocess.run([SH], input=self.agent + "\n" + MOCKS + "\n" + commands, encoding="utf-8", capture_output=True, env={**self.env, **env}, cwd=ROOT, timeout=30)
+        return subprocess.run([SH], input=self.agent + "\n" + MOCKS + "\n" + commands, encoding="utf-8", capture_output=True, env={**self.env, **env}, cwd=ROOT, timeout=60 if os.name == "nt" else 30)
 
     def test_old_and_explicit_manual_modes_ignore_host_rewrite(self):
         response = {"hub_update": {"vps_host": "hub.example", "hub_url": "https://hub.example", "public_url": "https://hub.example"}}
@@ -435,7 +435,7 @@ printf '%s' "$(uci_get hub_url '')"
         self.assertIn("<--post303>", args)
 
     def test_busybox_empty_table_is_confirmed_before_wan_start(self):
-        self.config(vps_host="193.233.82.38", hub_url="https://hub.example", wan_direct="1", vless_uuid="test-uuid")
+        self.config(vps_host="193.233.82.38", hub_url="https://hub.example", wan_direct="1", vless_uuid="11111111-1111-4111-8111-111111111111")
         result = self.run_shell('render_client_config --stdout', TABLE_QUERY_ERROR="busybox")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
@@ -596,7 +596,7 @@ post_json http://hub.example/api/heartbeat test-token "$TEST_ROOT/payload"
             self.assertFalse((self.directory / "owrt-remote-wan/lock").exists())
 
     def test_xray_only_reverse_sockets_are_bound_to_wan(self):
-        self.config(vps_host="193.233.82.38", wan_direct="1", vless_uuid="test-uuid")
+        self.config(vps_host="193.233.82.38", wan_direct="1", vless_uuid="11111111-1111-4111-8111-111111111111")
         result = self.run_shell("render_client_config --stdout")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)

@@ -72,7 +72,7 @@ class WanFailoverTests(unittest.TestCase):
 
     def prepare(self, interfaces="wan wwan modem4g"):
         self.config(wan_interface=interfaces, wan_direct="1", vps_host="192.0.2.10", vps_host_mode="manual",
-                    hub_url="https://hub.example", hub_token="test-token", vless_uuid="test-uuid")
+                    hub_url="https://hub.example", hub_token="test-token", vless_uuid="11111111-1111-4111-8111-111111111111")
         self.directory.joinpath("jsonfilter.py").write_text(JSONFILTER, encoding="utf-8")
 
     def shell(self, commands):

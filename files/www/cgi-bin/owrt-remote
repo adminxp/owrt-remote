@@ -262,17 +262,19 @@ normalize_xray_settings() {
 }
 
 apply_xray_settings() {
-	local script script_file output rc
+	local script script_file output trace stage rc
 	# HTML textarea POSTs use CRLF, even when the copied Hub commands use LF.
 	# BusyBox ash treats the trailing CR as part of keywords such as then/fi.
 	XRAY_SETTINGS_DRAFT="$(param xray_settings_script | tr -d '\r')"
 	script="$(printf '%s\n' "$XRAY_SETTINGS_DRAFT" | normalize_xray_settings)"
 	output="${TMPDIR:-/tmp}/owrt-remote-apply.$$"
 	script_file="${TMPDIR:-/tmp}/owrt-remote-apply-script.$$"
+	trace="${TMPDIR:-/tmp}/owrt-remote-apply-trace.$$"
 	rc=0
 	SHOW_XRAY_SETTINGS="1"
 
-	if [ -z "$(printf '%s' "$script" | tr -d '[:space:]')" ]; then
+	# BusyBox tr in OpenWrt does not enable [:space:] by default.
+	if [ -z "$(printf '%s' "$script" | tr -d ' \t\r\n\v\f')" ]; then
 		set_result "Xray настройки" "Вставь команды из OpenWrt config на VPS и нажми Применить." "warn"
 		return
 	fi
@@ -295,16 +297,36 @@ rc=$rc" "bad"
 		return
 	fi
 
+	: >"$trace"
+	chmod 600 "$trace" 2>/dev/null || true
+	export OWRT_REMOTE_APPLY_TRACE="$trace"
 	if sh -e "$script_file" >"$output" 2>&1; then
 		XRAY_SETTINGS_DRAFT=""
 		set_result "Xray настройки применены" "$(cat "$output")" "ok"
 	else
 		rc=$?
-		set_result "Ошибка применения Xray настроек" "$(cat "$output")
+		stage="$(tail -n 1 "$trace" 2>/dev/null)"
+		case "$stage" in
+			heartbeat)
+				set_result "Ошибка отправки Heartbeat после применения настроек" "$(cat "$output")
 rc=$rc
-Вставленные команды сохранены в поле ниже. Проверь полный блок OpenWrt config: каждая команда должна быть на отдельной строке." "bad"
+Сбой произошёл на отправке Heartbeat, а не при проверке JSON Xray. Ранее выполненные команды уже применены. Проверь указанный выше ответ HTTP-клиента и адрес Hub.
+Вставленные команды сохранены в поле ниже." "bad"
+				;;
+			render-client)
+				set_result "Ошибка проверки конфигурации Xray" "$(cat "$output")
+rc=$rc
+Новый JSON не установлен; перезапуск из этого блока не выполнен. Рабочий файл конфигурации сохранён. Уже записанные команды UCI не отменяются автоматически.
+Вставленные команды сохранены в поле ниже." "bad"
+				;;
+			*)
+				set_result "Ошибка применения Xray настроек" "$(cat "$output")
+rc=$rc
+Команда завершилась с ошибкой. Причина — в выводе выше; этот код сам по себе не означает ошибку форматирования. Вставленные команды сохранены в поле ниже." "bad"
+				;;
+		esac
 	fi
-	rm -f "$script_file" "$output"
+	rm -f "$script_file" "$output" "$trace"
 }
 
 run_action() {

@@ -1,5 +1,6 @@
 """Exercise the real router CGI POST with LF/CRLF and a strict POSIX shell."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -175,6 +176,86 @@ render_page() { printf 'KIND=%s\nTITLE=%s\nBODY=%s\nDRAFT=%s\n' "$RESULT_KIND" "
         self.assertIn("rc=7", response)
         self.assertFalse(self.directory.joinpath("restarted").exists())
 
+    def test_runtime_rc_one_does_not_blame_mobile_command_format(self):
+        response = self.post("printf '%s\\n' 'Real command failure' >&2\nexit 1\n")
+        self.assertIn("KIND=bad", response)
+        self.assertIn("rc=1", response)
+        self.assertIn("Real command failure", response)
+        self.assertNotIn("каждая команда должна быть на отдельной строке", response)
+
+    def test_xray_and_heartbeat_failures_have_distinct_stages_and_keep_draft(self):
+        for stage in ("render-client", "heartbeat"):
+            with self.subTest(stage=stage):
+                script = ('printf "%s\\n" "' + stage + '" >>"$OWRT_REMOTE_APPLY_TRACE"\n'
+                          "printf '%s\\n' 'Failed to allocate uclient context' >&2\nexit 1\n")
+                response = self.post(script.replace("\n", "\r\n"))
+                self.assertIn("KIND=bad", response)
+                self.assertIn("rc=1", response)
+                self.assertIn("Failed to allocate uclient context", response)
+                self.assertIn("DRAFT=" + script.rstrip("\n"), response)
+                self.assertNotIn("каждая команда должна быть на отдельной строке", response)
+                if stage == "heartbeat":
+                    self.assertIn("Ошибка отправки Heartbeat после применения настроек", response)
+                    self.assertNotIn("Ошибка проверки конфигурации Xray", response)
+                else:
+                    self.assertIn("Ошибка проверки конфигурации Xray", response)
+                    self.assertIn("Рабочий файл конфигурации сохранён", response)
+
+    def test_real_agent_heartbeat_failure_is_labeled_without_blaming_xray(self):
+        agent = (ROOT / "files/usr/sbin/owrt-remote").read_text(encoding="utf-8")
+        mocks = r'''
+uci_get() {
+    case "$1" in hub_url) printf https://hub.example ;; hub_token) printf test-token ;; vps_host) printf hub.example ;; *) printf '%s' "$2" ;; esac
+}
+heartbeat_json() { printf '{"id":"test-router"}'; }
+post_json() { echo 'Failed to allocate uclient context' >&2; return 1; }
+logger() { :; }
+'''
+        tools = self.directory / "bin"
+        tools.joinpath("owrt-remote").write_text(agent.replace('cmd="${1:-help}"', mocks + '\ncmd="${1:-help}"', 1),
+                                               encoding="utf-8", newline="\n")
+        tools.joinpath("owrt-remote").chmod(0o755)
+        script = 'printf restarted >"$TEST_ROOT/restarted"\nowrt-remote heartbeat\n'
+        response = self.post(script.replace("\n", "\r\n"))
+        self.assertIn("KIND=bad", response)
+        self.assertIn("Ошибка отправки Heartbeat после применения настроек", response)
+        self.assertIn("Failed to allocate uclient context", response)
+        self.assertNotIn("каждая команда должна быть на отдельной строке", response)
+        self.assertTrue(self.directory.joinpath("restarted").exists())
+
+    @unittest.skipUnless(os.environ.get("OWRT_TEST_XRAY_BIN"), "Set OWRT_TEST_XRAY_BIN to exercise real Xray")
+    def test_mobile_post_shows_real_xray_error_before_restart_and_keeps_json(self):
+        target = self.directory / "working.json"
+        target.write_text('{"previous":true}\n', encoding="utf-8")
+        self.env["TEST_XRAY_BIN"] = Path(os.environ["OWRT_TEST_XRAY_BIN"]).as_posix()
+        agent = (ROOT / "files/usr/sbin/owrt-remote").read_text(encoding="utf-8")
+        mocks = r'''
+uci_get() {
+    case "$1" in
+        vps_host) printf hub.example ;; vless_uuid) printf 11111111-1111-4111-8111-111111111111 ;;
+        ssh_vless_uuid) printf 22222222-2222-4222-8222-222222222222 ;;
+        xray_config) printf '%s/working.json' "$TEST_ROOT" ;; xray_bin) printf '%s' "$TEST_XRAY_BIN" ;;
+        vless_flow) printf not-supported ;; *) printf '%s' "$2" ;;
+    esac
+}
+ensure_xray_available() { return 0; }
+logger() { :; }
+'''
+        executable = self.directory / "bin/owrt-remote"
+        executable.write_text(agent.replace('cmd="${1:-help}"', mocks + '\ncmd="${1:-help}"', 1),
+                              encoding="utf-8", newline="\n")
+        executable.chmod(0o755)
+        script = 'owrt-remote render-client\nprintf restarted >"$TEST_ROOT/restarted"\n'
+        response = self.post(script.replace("\n", "\r\n"))
+        self.assertIn("KIND=bad", response)
+        self.assertIn("Ошибка проверки конфигурации Xray", response)
+        self.assertIn('VLESS users: "flow"', response)
+        self.assertIn("not-supported", response)
+        self.assertIn("rc=23", response)
+        self.assertFalse(self.directory.joinpath("restarted").exists())
+        self.assertEqual(target.read_text(), '{"previous":true}\n')
+        self.assertFalse(list(self.directory.glob(".owrt-remote-client.*")))
+
     def test_empty_and_unauthorized_form_do_not_execute_commands(self):
         self.assertIn("KIND=warn", self.post(" \r\n\t\r\n"))
         self.assertFalse(self.directory.joinpath("calls").exists())
@@ -182,6 +263,73 @@ render_page() { printf 'KIND=%s\nTITLE=%s\nBODY=%s\nDRAFT=%s\n' "$RESULT_KIND" "
         self.assertIn("Доступ запрещен", response)
         self.assertFalse(self.directory.joinpath("applied").exists())
         self.assertFalse(self.directory.joinpath("calls").exists())
+
+    @unittest.skipUnless(os.environ.get("OWRT_TEST_XRAY_BIN"), "Set OWRT_TEST_XRAY_BIN to exercise real Xray")
+    def test_full_mobile_hub_config_with_classless_openwrt_tr_and_real_xray(self):
+        from test_xray_validation import ADMIN_UUID, SSH_UUID, CLASSLESS_TR
+
+        self.env["TEST_XRAY_BIN"] = Path(os.environ["OWRT_TEST_XRAY_BIN"]).as_posix()
+        uci_function = r'''
+uci() {
+    [ "$1" != -q ] || shift
+    case "$1" in
+        get)
+            [ "$2" != owrtremote.main ] || { echo remote; return; }
+            awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; found=1; exit } END { if(!found) exit 1 }' "$TEST_ROOT/uci" ;;
+        set)
+            key="${2%%=*}"; value="${2#*=}"
+            awk -F= -v key="$key" '$1 != key' "$TEST_ROOT/uci" >"$TEST_ROOT/uci.new"
+            printf '%s=%s\n' "$key" "$value" >>"$TEST_ROOT/uci.new"
+            mv "$TEST_ROOT/uci.new" "$TEST_ROOT/uci" ;;
+        commit) printf 'commit\n' >>"$TEST_ROOT/operations" ;;
+    esac
+}
+'''
+        self.directory.joinpath("uci").write_text("", encoding="utf-8")
+        self.directory.joinpath("bin/uci").write_text("#!/bin/sh\n" + uci_function + '\nuci "$@"\n',
+                                                  encoding="utf-8", newline="\n")
+        # Both CGI and its separate agent process see a BusyBox-like tr.
+        self.directory.joinpath("bin/tr").write_text("#!/bin/sh\n" + CLASSLESS_TR.replace("command tr", "command /usr/bin/tr") + '\ntr "$@"\n',
+                                                 encoding="utf-8", newline="\n")
+        self.directory.joinpath("bin/tr").chmod(0o755)
+        agent = (ROOT / "files/usr/sbin/owrt-remote").read_text(encoding="utf-8")
+        mocks = r'''
+uci_get_original() {
+__UCI_GET_BODY__
+}
+uci_get() {
+    case "$1" in
+        xray_config) printf '%s/working.json' "$TEST_ROOT" ;;
+        xray_bin) printf '%s' "$TEST_XRAY_BIN" ;;
+        *) uci_get_original "$@" ;;
+    esac
+}
+ensure_xray_available() { return 0; }
+send_heartbeat() { printf 'heartbeat\n' >>"$TEST_ROOT/operations"; }
+logger() { :; }
+'''.replace("__UCI_GET_BODY__", agent.split("uci_get() {\n", 1)[1].split("\n}\n", 1)[0])
+        executable = self.directory / "bin/owrt-remote"
+        executable.write_text(agent.replace('cmd="${1:-help}"', CLASSLESS_TR + mocks + '\ncmd="${1:-help}"', 1),
+                              encoding="utf-8", newline="\n")
+        executable.chmod(0o755)
+        self.directory.joinpath("working.json").write_text('{"previous":true}\n', encoding="utf-8")
+        row = {"id": "main", "name": "test", "vps_host": "hub.example", "reverse_tag": "reverse-in",
+               "ssh_reverse_tag": "reverse-in-ssh", "vless_uuid": ADMIN_UUID, "ssh_vless_uuid": SSH_UUID}
+        with mock.patch.object(hub, "agent_token", return_value="test-agent-token"):
+            generated = hub.make_openwrt_config(row, "https://hub.example")
+        generated = generated.replace("/etc/init.d/owrt-remote", "test_service")
+        response = self.post(('test_service() { printf "service %s\\n" "$*" >>"$TEST_ROOT/operations"; }\n' + generated).replace("\n", "\r\n"))
+        self.assertIn("KIND=ok", response)
+        self.assertIn("Configuration OK", response)
+        config = json.loads(self.directory.joinpath("working.json").read_text())
+        self.assertEqual(config["outbounds"][2]["settings"]["reverse"]["tag"], "reverse-in")
+        self.assertEqual(config["outbounds"][3]["settings"]["reverse"]["tag"], "reverse-in-ssh")
+        self.assertEqual(config["outbounds"][2]["settings"]["address"], "hub.example")
+        self.assertEqual(self.directory.joinpath("operations").read_text(), "commit\nservice enable\nservice restart\nheartbeat\n")
+        self.assertFalse(list(self.directory.glob(".owrt-remote-client.*")))
+        self.directory.joinpath("operations").unlink()
+        self.assertIn("KIND=warn", self.post(" \r\n\t\v\f\r\n"))
+        self.assertFalse(self.directory.joinpath("operations").exists())
 
     def test_full_hub_config_through_form_preserves_manual_host_and_wan(self):
         self.directory.joinpath("uci").write_text("owrtremote.main.vps_host=192.0.2.25\nowrtremote.main.wan_interface=wwan\n", encoding="utf-8")

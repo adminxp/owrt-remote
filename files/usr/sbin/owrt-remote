@@ -55,7 +55,20 @@ truthy() {
 }
 
 json_escape() {
-	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'
+	# The final sentinel retains trailing newlines through awk's record split.
+	printf '%s.' "$1" | LC_ALL=C awk '
+		BEGIN { for (i = 1; i < 32; i++) escape[sprintf("%c", i)] = sprintf("\\u%04x", i) }
+		{ if (NR > 1) value = value "\n"; value = value $0 }
+		END {
+			value = substr(value, 1, length(value) - 1)
+			for (i = 1; i <= length(value); i++) {
+				char = substr(value, i, 1)
+				if (char == "\\") printf "\\\\"
+				else if (char == "\"") printf "\\\""
+				else if (char in escape) printf "%s", escape[char]
+				else printf "%s", char
+			}
+		}'
 }
 
 json_string() {
@@ -516,8 +529,62 @@ service_enabled() {
 	/etc/init.d/owrt-remote enabled >/dev/null 2>&1
 }
 
-render_client_config() {
-	local out stdout router_id vps_host vps_port uuid ssh_uuid encryption flow reverse_tag ssh_reverse_tag admin_host admin_port ssh_host ssh_port xray_config xray_config_dir
+xray_apply_trace() {
+	[ -z "${OWRT_REMOTE_APPLY_TRACE:-}" ] || printf '%s\n' "$1" >>"$OWRT_REMOTE_APPLY_TRACE"
+	return 0
+}
+
+xray_valid_uuid() {
+	[ "${#1}" = 36 ] || return 1
+	printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+xray_port() {
+	LC_ALL=C awk -v value="$2" -v field="$1" 'BEGIN {
+		if (value !~ /^[0-9]+$/ || value + 0 < 1 || value + 0 > 65535) {
+			printf "ОШИБКА: %s должен быть целым числом от 1 до 65535\n", field > "/dev/stderr"
+			exit 1
+		}
+		printf "%d", value + 0
+	}'
+}
+
+xray_valid_tag() {
+	[ -n "$2" ] || { log "ОШИБКА: $1 пустой"; return 1; }
+	# OpenWrt's BusyBox tr normally has character classes disabled. Use
+	# explicit ASCII bytes; [:space:][:cntrl:] would delete ordinary letters.
+	if [ "$(printf '%s' "$2" | LC_ALL=C tr -d '\001-\040\177')" != "$2" ]; then
+		log "ОШИБКА: $1 содержит пробел или управляющий символ; метка должна сохраняться из OpenWrt config без изменений"
+		return 1
+	fi
+	case "$2" in router-admin|router-ssh|vps-interconn|vps-ssh-interconn)
+		log "ОШИБКА: $1 совпадает с внутренней меткой клиента"; return 1 ;;
+	esac
+}
+
+validate_xray_config() {
+	local file binary rc
+	file="$1"
+	binary="$(xray_bin_path)"
+	[ -s "$file" ] || { log "ОШИБКА: конфигурация Xray отсутствует или пуста: $file"; return 1; }
+	[ -x "$binary" ] || { log "ОШИБКА: Xray не найден или не исполняемый: $binary"; return 1; }
+	printf 'Проверка Xray: %s -test -config %s\n' "$binary" "$file" >&2
+	if "$binary" -test -config "$file" >&2; then
+		return 0
+	else
+		rc=$?
+		printf 'Проверка Xray не пройдена (rc=%s). Рабочий JSON не заменён.\n' "$rc" >&2
+		return "$rc"
+	fi
+}
+
+render_client_config() (
+	local temp_dir rc xray_host out stdout router_id vps_host vps_port uuid ssh_uuid encryption flow reverse_tag ssh_reverse_tag admin_host admin_port ssh_host ssh_port xray_config xray_config_dir
+	temp_dir=""
+	out=""
+	trap 'rm -f "$out"; [ -z "$temp_dir" ] || rmdir "$temp_dir" 2>/dev/null || true' EXIT
+	trap 'exit 1' INT TERM
+	umask 077
 	stdout="0"
 	if [ "${1:-}" = "--stdout" ]; then
 		stdout="1"
@@ -534,30 +601,46 @@ render_client_config() {
 		wan_xray_device="$(wan_device)" || die "выбранный WAN интерфейс отключился"
 		wan_sockopt=", \"sockopt\": {\"mark\": $((PODKOP_BYPASS_MARK)), \"interface\": \"$(json_escape "$wan_xray_device")\"}"
 	fi
-	vps_port="$(safe_num "$(uci_get vps_port 8443)" 8443)"
+	vps_port="$(xray_port vps_port "$(uci_get vps_port 8443)")" || return 1
 	uuid="$(uci_get vless_uuid '')"
 	ssh_uuid="$(uci_get ssh_vless_uuid '')"
 	encryption="$(uci_get vless_encryption none)"
 	flow="$(uci_get vless_flow '')"
-	reverse_tag="$(safe_id "$(uci_get reverse_tag reverse-in)")"
-	ssh_reverse_tag="$(safe_id "$(uci_get ssh_reverse_tag "${reverse_tag}-ssh")")"
+	reverse_tag="$(uci_get reverse_tag reverse-in)"
+	ssh_reverse_tag="$(uci_get ssh_reverse_tag "${reverse_tag}-ssh")"
 	admin_host="$(uci_get admin_host 127.0.0.1)"
-	admin_port="$(safe_num "$(uci_get admin_port 80)" 80)"
+	admin_port="$(xray_port admin_port "$(uci_get admin_port 80)")" || return 1
 	ssh_host="$(uci_get ssh_host 127.0.0.1)"
-	ssh_port="$(safe_num "$(uci_get ssh_port 22)" 22)"
+	ssh_port="$(xray_port ssh_port "$(uci_get ssh_port 22)")" || return 1
 	xray_config="$(uci_get xray_config /etc/xray/owrt-remote-client.json)"
 
 	[ -n "$vps_host" ] || die "vps_host пустой"
 	[ -n "$uuid" ] || die "vless_uuid пустой"
 	[ -n "$ssh_uuid" ] || ssh_uuid="$uuid"
+	xray_valid_uuid "$uuid" || die "vless_uuid: ожидается UUID в формате 8-4-4-4-12; значение не исправляется автоматически"
+	xray_valid_uuid "$ssh_uuid" || die "ssh_vless_uuid: ожидается UUID в формате 8-4-4-4-12; значение не исправляется автоматически"
+	[ -z "$(uci_get ssh_vless_uuid '')" ] || [ "$uuid" != "$ssh_uuid" ] || die "vless_uuid и ssh_vless_uuid должны различаться для двух reverse-туннелей"
+	xray_valid_tag reverse_tag "$reverse_tag" || return 1
+	xray_valid_tag ssh_reverse_tag "$ssh_reverse_tag" || return 1
+	[ "$reverse_tag" != "$ssh_reverse_tag" ] || die "reverse_tag и ssh_reverse_tag должны различаться"
+	for xray_host in "$vps_host" "$admin_host" "$ssh_host"; do
+		[ -n "$xray_host" ] || die "VPS/admin/SSH host пустой"
+		if [ "$(printf '%s' "$xray_host" | LC_ALL=C tr -d '\001-\040\177')" != "$xray_host" ]; then
+			die "VPS/admin/SSH host содержит пробел или управляющий символ"
+		fi
+	done
+	case "$vps_host" in *://*|*/*) die "vps_host должен содержать IP или домен без http(s):// и пути" ;; esac
 
 	if [ "$stdout" = "1" ]; then
-		out="${TMPDIR:-/tmp}/owrt-remote-client.$$"
+		xray_config_dir="${TMPDIR:-/tmp}"
 	else
 		xray_config_dir="$(dirname "$xray_config")"
-		mkdir -p "$xray_config_dir"
-		out="$xray_config_dir/.owrt-remote-client.$$"
+		mkdir -p "$xray_config_dir" || return 1
 	fi
+	temp_dir="$(mktemp -d "$xray_config_dir/.owrt-remote-client.XXXXXX")" || return 1
+	# Xray detects JSON by extension; keep the candidate private and on the
+	# same filesystem as the destination so the final rename is atomic.
+	out="$temp_dir/config.json"
 	cat >"$out" <<EOF
 {
   "log": {
@@ -639,17 +722,20 @@ render_client_config() {
   "remarks": "OpenWrt Remote client for $(json_escape "$router_id")"
 }
 EOF
+	rc=$?
+	[ "$rc" = 0 ] || return "$rc"
+	chmod 0600 "$out" || return 1
 
 	if [ "$stdout" = "1" ]; then
 		cat "$out"
-		rm -f "$out"
 		return
 	fi
 
-	mv -f "$out" "$xray_config"
-	chmod 0600 "$xray_config"
+	ensure_xray_available >&2 || return 1
+	validate_xray_config "$out" || return $?
+	mv -f "$out" "$xray_config" || return 1
 	printf '%s\n' "$xray_config"
-}
+)
 
 run_xray() {
 	local enabled xray_bin xray_config
@@ -727,11 +813,14 @@ heartbeat_json() {
 EOF
 }
 
-post_json() {
+post_json() (
 	local url token file
 	url="$1"
 	token="$2"
 	file="$3"
+	# uclient treats an empty *_proxy env value as a proxy URL, then fails
+	# to allocate its client for that empty URL. Remove variables entirely.
+	unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 	if truthy "$(uci_get wan_direct 0)"; then
 		wan_post_json "$url" "$token" "$file"
 		return
@@ -746,21 +835,21 @@ post_json() {
 		return
 	fi
 	if command -v wget >/dev/null 2>&1; then
-		http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= all_proxy= wget -q -T 10 -O - \
+		wget -q -T 10 -O - \
 			--header="Authorization: Bearer $token" \
 			--header="Content-Type: application/json" \
 			--post-file="$file" "$url"
 		return
 	fi
 	if command -v uclient-fetch >/dev/null 2>&1; then
-		http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= all_proxy= uclient-fetch -q -T 10 -O - \
+		uclient-fetch -q -T 10 -O - \
 			--header="Authorization: Bearer $token" \
 			--header="Content-Type: application/json" \
 			--post-file="$file" "$url"
 		return
 	fi
 	die "для heartbeat нужен uclient-fetch, wget или curl"
-}
+)
 
 global_logs_state() {
 	local enabled xray
@@ -1336,13 +1425,17 @@ case "$cmd" in
 		stop_xray
 		;;
 	render-client)
-		render_client_config "$@"
+		xray_apply_trace render-client
+		render_client_config "$@" || exit $?
+		xray_apply_trace render-client-ok
 		;;
 	run)
 		run_xray
 		;;
 	heartbeat)
-		send_heartbeat "$@"
+		xray_apply_trace heartbeat
+		send_heartbeat "$@" || exit $?
+		xray_apply_trace heartbeat-ok
 		;;
 	heartbeat-loop)
 		heartbeat_loop
