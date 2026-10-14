@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$UploadName = 'owrt-version-v115-' + [guid]::NewGuid().ToString('N')
+$UploadName = 'owrt-global-logs-vps-' + [guid]::NewGuid().ToString('N')
 $StageRoot = Join-Path ([System.IO.Path]::GetTempPath()) $UploadName
 $Utf8 = [System.Text.UTF8Encoding]::new($false)
 
@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-v115
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-global-logs-ui-v116
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 
@@ -57,10 +57,14 @@ if [ '__ACTION__' = Install ]; then
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).read_text(encoding='utf-8')
-required = ('v115',)
-if 'v' + '114' in source:
-    print('Old UI version remains in candidate', file=sys.stderr)
-    raise SystemExit(1)
+required = (
+    'def receive_router_logs(',
+    'def router_log_diagnosis(',
+    'def router_logs_html(',
+    'def router_logs_api(',
+    'data-global-logs-link=',
+    'ROUTER_LOG_MAX_BYTES = 2 * 1024 * 1024',
+)
 missing = [marker for marker in required if marker not in source]
 if missing:
     for marker in missing:
@@ -103,7 +107,7 @@ if [ "$healthy" -ne 1 ]; then
     exit 1
 fi
 cmp "$source_file" "$target"
-printf '\nBackup: %s\nHUB_V115_%s_OK\n' "$backup" '__ACTION__'
+printf '\nBackup: %s\nGLOBAL_LOGS_VPS_V116_%s_OK\n' "$backup" '__ACTION__'
 '@
 
 $RemoteScript = $RemoteScript.Replace('__UPLOAD_NAME__', $UploadName).Replace('__ACTION__', $Action)
@@ -130,7 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Upload failed. VPS was not changed.' }
     & ssh -T -o ConnectTimeout=10 $Vps "sh /tmp/$UploadName/run.sh"
     if ($LASTEXITCODE -ne 0) { throw "$Action failed. See the output above; success was not confirmed." }
-    Write-Host "Hub v115 $Action finished successfully. Refresh the Hub panel."
+    Write-Host "Global logs VPS $Action finished successfully. Refresh Hub with Ctrl+F5."
 }
 finally {
     if (-not $PrepareOnly) {

@@ -7,7 +7,8 @@ SECTION="main"
 XRAY_RELEASE_BASE_URL="${XRAY_RELEASE_BASE_URL:-https://github.com/XTLS/Xray-core/releases/latest/download}"
 
 log() {
-	printf '%s\n' "$*" >&2
+	# procd already captures stderr. Use only logger for managed processes.
+	[ "${OWRT_REMOTE_SERVICE_LOG:-0}" = 1 ] || printf '%s\n' "$*" >&2
 	logger -t owrt-remote "$*" 2>/dev/null || true
 }
 
@@ -27,6 +28,7 @@ usage() {
   owrt-remote run
   owrt-remote heartbeat
   owrt-remote heartbeat-loop
+  owrt-remote logs-sync
   owrt-remote network-diagnostics
 
 Настройки лежат в /etc/config/owrtremote.
@@ -559,7 +561,9 @@ render_client_config() {
 	cat >"$out" <<EOF
 {
   "log": {
-    "loglevel": "info"
+    "access": "none",
+    "error": "",
+    "loglevel": "warning"
   },
   "inbounds": [],
   "outbounds": [
@@ -757,6 +761,65 @@ post_json() {
 	fi
 	die "для heartbeat нужен uclient-fetch, wget или curl"
 }
+
+global_logs_state() {
+	local enabled xray
+	enabled=false; xray=stopped
+	truthy "$(uci_get enabled 0)" && enabled=true
+	xray_running && xray=running
+	printf '{"enabled":%s,"xray":"%s"}' "$enabled" "$xray"
+}
+
+sync_global_logs() (
+	local helper router_id batch file response endpoint base token journal offset clear_token rc sync_lock owner attempt
+	helper="${OWRT_REMOTE_LOG_HELPER:-/usr/lib/owrt-remote/logs.sh}"
+	[ -r "$helper" ] || return 0
+	token="$(uci_get hub_token '')"; [ -n "$token" ] || return 0
+	# The journal is independent of Remote's enabled flag and Xray lifecycle.
+	sh "$helper" check || return 1
+	sync_lock="${OWRT_REMOTE_LOG_DIR:-/tmp/owrt-remote-logs}/sync-lock"
+	if ! mkdir "$sync_lock" 2>/dev/null; then
+		# Give a sender time to write its PID, then recover an abandoned lock.
+		for attempt in 1 2 3 4 5 6 7 8 9 10; do
+			owner="$(cat "$sync_lock/pid" 2>/dev/null)"
+			case "$owner" in ''|*[!0-9]*) sleep 0.1 ;; *) break ;; esac
+		done
+		owner="$(cat "$sync_lock/pid" 2>/dev/null)"
+		case "$owner" in ''|*[!0-9]*) ;; *) kill -0 "$owner" 2>/dev/null && return 0 ;; esac
+		rm -f "$sync_lock/pid"; rmdir "$sync_lock" 2>/dev/null || return 0
+		mkdir "$sync_lock" 2>/dev/null || return 0
+	fi
+	printf '%s\n' "$$" >"$sync_lock/pid"
+	file=''; response=''
+	trap 'rm -f "$file" "$response" "$sync_lock/pid"; rmdir "$sync_lock" 2>/dev/null || true' EXIT
+	trap 'exit 1' INT TERM
+	if truthy "$(uci_get wan_direct 0)" && [ ! -s "$WAN_STATE/active-interface" ]; then wan_prepare || return 1; fi
+	batch="$(sh "$helper" export)" || return 1
+	router_id="$(safe_id "$(uci_get router_id main)")"
+	# export verifies that this directory is on tmpfs; payloads also stay in RAM.
+	umask 077
+	file="${OWRT_REMOTE_LOG_DIR:-/tmp/owrt-remote-logs}/sync.$$"; response="$file.response"
+	printf '{"id":%s,"batch":%s,"state":%s}\n' "$(json_string "$router_id")" "$batch" "$(global_logs_state)" >"$file"
+	for endpoint in $(heartbeat_candidate_endpoints); do
+		base="$(heartbeat_base_from_endpoint "$endpoint")"
+		if post_json "$base/api/router-logs" "$token" "$file" >"$response" 2>/dev/null &&
+			grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
+			journal="$(jsonfilter -i "$response" -e '@.journal_id' 2>/dev/null)"
+			offset="$(jsonfilter -i "$response" -e '@.offset' 2>/dev/null)"
+			clear_token="$(jsonfilter -i "$response" -e '@.clear_request' 2>/dev/null)"
+			sh "$helper" ack "$journal" "$offset" "$clear_token"
+			rc=$?
+			rm -f "$file" "$response"
+			rm -f "$sync_lock/pid"; rmdir "$sync_lock" 2>/dev/null || true
+			trap - EXIT INT TERM
+			return "$rc"
+		fi
+	done
+	rm -f "$file" "$response"
+	rm -f "$sync_lock/pid"; rmdir "$sync_lock" 2>/dev/null || true
+	trap - EXIT INT TERM
+	return 1
+)
 
 heartbeat_base_from_endpoint() {
 	printf '%s' "${1%/api/heartbeat}"
@@ -1283,6 +1346,9 @@ case "$cmd" in
 		;;
 	heartbeat-loop)
 		heartbeat_loop
+		;;
+	logs-sync)
+		sync_global_logs
 		;;
 	*)
 		usage >&2

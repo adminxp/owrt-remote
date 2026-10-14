@@ -3083,6 +3083,158 @@ def clean_router_name(value):
 
 
 ROUTER_NOTE_TEXT_MAX_CHARS = 2000
+ROUTER_LOG_MAX_BYTES = 2 * 1024 * 1024
+ROUTER_LOG_BATCH_MAX_BYTES = 65536
+
+
+def redact_router_log_bytes(raw):
+    """Defense in depth: do not archive credentials supplied by older agents."""
+    secret = re.compile(rb'authorization|hub_token|vless_uuid|ssh_vless_uuid|password|passwd|web[._ -]?key|[?&](?:key|token)=|"(?:uuid|privatekey)"|[0-9a-f]{8}-[0-9a-f-]{27,}', re.I)
+    redacted = []
+    for line in raw.splitlines(keepends=True):
+        if secret.search(line):
+            level = re.match(rb'\[(OK|WARN|ERROR)\]', line)
+            prefix = level.group(0) if level else b'[WARN]'
+            line = prefix + ' [строка с ключом или паролем скрыта]\n'.encode('utf-8')
+        redacted.append(line)
+    return b''.join(redacted)
+
+
+def receive_router_logs(conn, router_id, batch, state=None):
+    router_id = clean_router_id(router_id)
+    if not get_active_router(conn, router_id):
+        raise ValueError('router not found; send a heartbeat first')
+    if not isinstance(batch, dict):
+        raise ValueError('invalid log batch')
+    journal_id = str(batch.get('journal_id') or '')
+    clear_ack = str(batch.get('clear_ack') or '')
+    if not re.fullmatch(r'[A-Za-z0-9._:-]{1,80}', journal_id) or (clear_ack and not re.fullmatch(r'[A-Za-z0-9._:-]{1,80}', clear_ack)):
+        raise ValueError('invalid log journal id')
+    start, end = batch.get('from'), batch.get('to')
+    if type(start) is not int or type(end) is not int or not 0 <= start <= end <= 2**53:
+        raise ValueError('invalid log cursor')
+    data = batch.get('data')
+    if not isinstance(data, str) or len(data) > 87384:
+        raise ValueError('log batch is too large')
+    raw = base64.b64decode(data, validate=True)
+    if len(raw) > ROUTER_LOG_BATCH_MAX_BYTES or end - start != len(raw):
+        raise ValueError('invalid log batch size')
+    ts = now_ts()
+    # Serialize ingestion and offline clears using SQLite's existing transaction.
+    conn.execute('update router_logs set last_sync = last_sync where router_id = ?', (router_id,))
+    row = conn.execute('select * from router_logs where router_id = ?', (router_id,)).fetchone()
+    if row is None:
+        conn.execute('insert into router_logs(router_id) values (?)', (router_id,))
+        row = conn.execute('select * from router_logs where router_id = ?', (router_id,)).fetchone()
+    if state is not None:
+        if (not isinstance(state, dict) or type(state.get('enabled')) is not bool
+                or state.get('xray') not in {'running', 'stopped'}):
+            raise ValueError('invalid log delivery state')
+        conn.execute('update router_logs set state_json = ?, state_at = ? where router_id = ?',
+                     (json.dumps({'enabled': state['enabled'], 'xray': state['xray']}), ts, router_id))
+    pending = row['clear_request']
+    if pending and clear_ack != pending:
+        conn.execute('update router_logs set last_sync = ? where router_id = ?', (ts, router_id))
+        return {'journal_id': journal_id, 'offset': end, 'clear_request': pending}
+    cursor = int(row['cursor']) if row['journal_id'] == journal_id else 0
+    if not pending and row['journal_id'] == journal_id and end <= cursor:
+        conn.execute('update router_logs set last_sync = ? where router_id = ?', (ts, router_id))
+        return {'journal_id': journal_id, 'offset': cursor, 'clear_request': ''}
+    stored = bytes(row['content'])
+    if pending:
+        cursor = start
+        stored = b''
+    elif row['journal_id'] and row['journal_id'] != journal_id:
+        stored += ('[OK] ' + iso_time(ts) + ' Роутер начал новый журнал: перезагрузка или очистка в ОЗУ.\n').encode('utf-8')
+    if start > cursor:
+        stored += ('[WARN] ' + iso_time(ts) + ' Часть записей не доставлена до ротации журнала на роутере.\n').encode('utf-8')
+    if end > cursor:
+        stored += redact_router_log_bytes(raw[max(0, cursor - start):])
+    stored = stored[-ROUTER_LOG_MAX_BYTES:]
+    conn.execute('''update router_logs set content = ?, journal_id = ?, cursor = ?,
+                    updated_at = case when ? then ? else updated_at end, last_sync = ?, clear_request = ''
+                    where router_id = ?''',
+                 (stored, journal_id, max(cursor, end), bool(raw and end > cursor), ts, ts, router_id))
+    return {'journal_id': journal_id, 'offset': max(cursor, end), 'clear_request': ''}
+
+
+def router_log_snapshot(conn, router_id):
+    row = conn.execute('select * from router_logs where router_id = ?', (router_id,)).fetchone()
+    raw = bytes(row['content']) if row else b''
+    # The live browser view stays small; downloading returns the full archive.
+    live = raw[-65536:]
+    if len(raw) > 65536 and b'\n' in live:
+        live = live.split(b'\n', 1)[1]
+    diagnosis = router_log_diagnosis(conn, router_id, row, raw)
+    return {'text': live.decode('utf-8', errors='replace'), 'bytes': len(raw), 'diagnosis': diagnosis,
+            'updated_at': row['updated_at'] if row else 0, 'last_sync': row['last_sync'] if row else 0,
+            'pending_clear': bool(row and row['clear_request'])}, raw
+
+
+def router_log_diagnosis(conn, router_id, archive=None, raw=None):
+    """Report evidence received on the VPS; never invent a network failure cause."""
+    router_row = get_active_router(conn, router_id)
+    router = row_to_router(router_row) if router_row else {}
+    if archive is None:
+        archive = conn.execute('select * from router_logs where router_id = ?', (router_id,)).fetchone()
+    raw = bytes(archive['content']) if raw is None and archive else (raw or b'')
+    state = json.loads(archive['state_json'] or '{}') if archive else {}
+    state_at = int(archive['state_at']) if archive else 0
+    last_seen = int(router.get('last_seen') or 0)
+    fresh_state = bool(state_at and state_at >= last_seen)
+    if fresh_state and state.get('enabled') is False:
+        detail = 'Туннель и Heartbeat остановлены.' if state.get('xray') == 'stopped' else 'Xray ещё запущен.'
+        return {'level': 'warn', 'text': 'Remote выключен на роутере. ' + detail + ' Отправка логов не отключается вместе с Remote.', 'at': state_at}
+    if fresh_state and state.get('xray') == 'stopped':
+        return {'level': 'error', 'text': 'Роутер сообщил: Xray остановлен. Remote включён, но туннель не работает.', 'at': state_at}
+    # Older agents have no state metadata: use explicit lifecycle facts from
+    # their delivered journal. A later start cancels the earlier stop reason.
+    for line in reversed(raw.decode('utf-8', errors='replace').splitlines()):
+        if ' Hub:' in line:
+            continue
+        if 'Сервис: запуск' in line or 'Сервис перезапущен' in line or 'Сервис запущен' in line:
+            break
+        if 'Сервис остановлен; результат=warn' in line:
+            if not state_at:
+                return {'level': 'warn', 'text': 'Получен журнал: сервис Remote остановлен через панель роутера.', 'at': 0}
+            break
+    if router.get('online'):
+        return {'level': 'ok', 'text': 'Heartbeat поступает.' + (' Роутер сообщил: Xray запущен.' if fresh_state and state.get('xray') == 'running' else ''), 'at': last_seen}
+    # Highlight a delivered error, without claiming it caused an unseen outage.
+    for line in reversed(raw.decode('utf-8', errors='replace').splitlines()):
+        if ' Hub:' in line:
+            continue
+        if 'Heartbeat: OK;' in line or 'core: Xray ' in line and ' started' in line:
+            break
+        if line.startswith(('[ERROR]', '[WARN]')) and 'строка с ключом' not in line:
+            return {'level': 'warn', 'text': 'Heartbeat не поступает. Последнее доставленное предупреждение или ошибка: ' + line[:600], 'at': 0}
+    return {'level': 'warn', 'text': 'Heartbeat не поступает. Причина обрыва не доставлена на VPS; подтверждён только тайм-аут связи.', 'at': 0}
+
+
+def clear_router_log_archive(conn, router_id):
+    request = uuid.uuid4().hex
+    conn.execute('''insert into router_logs(router_id, clear_request) values (?, ?)
+                    on conflict(router_id) do update set content = X'', updated_at = 0, clear_request = excluded.clear_request''',
+                 (router_id, request))
+    return request
+
+
+def record_router_connection_log(conn, router_id, online):
+    # Take the same write lock as ingestion before reading/appending content.
+    conn.execute('update router_logs set last_sync = last_sync where router_id = ?', (router_id,))
+    if not get_active_router(conn, router_id):
+        return
+    row = conn.execute('select content from router_logs where router_id = ?', (router_id,)).fetchone()
+    raw = bytes(row['content']) if row else b''
+    message = ('[OK] ' if online else '[WARN] ') + iso_time(now_ts())
+    reason = router_log_diagnosis(conn, router_id, raw=raw)['text'] if not online else ''
+    message += (' Hub: Heartbeat снова поступает.\n' if online else
+                ' Hub: истекло время ожидания Heartbeat, карточка отмечена оффлайн. ' + reason + '\n')
+    raw = (raw + message.encode('utf-8'))[-ROUTER_LOG_MAX_BYTES:]
+    conn.execute('''insert into router_logs(router_id, content, updated_at) values (?, ?, ?)
+                    on conflict(router_id) do update set content = excluded.content, updated_at = excluded.updated_at''',
+                 (router_id, raw, now_ts()))
+
 ROUTER_NOTES_MAX_ENTRIES = 200
 ROUTER_NOTES_STORAGE_VERSION = 1
 ROUTER_NOTES_MEDIA_DIR = STATE_DIR / "router-note-images"
@@ -3368,6 +3520,13 @@ def init_db(conn):
         )
         """
     )
+    conn.execute('''create table if not exists router_logs (
+        router_id text primary key, content blob not null default X'',
+        journal_id text not null default '', cursor integer not null default 0,
+        updated_at integer not null default 0, last_sync integer not null default 0,
+        clear_request text not null default '')''')
+    ensure_column(conn, 'router_logs', 'state_json', "text not null default '{}'")
+    ensure_column(conn, 'router_logs', 'state_at', 'integer not null default 0')
     ensure_column(conn, "routers", "custom_name", "text not null default ''")
     ensure_column(conn, "routers", "group_id", "text not null default ''")
     ensure_column(conn, "routers", "deleted_at", "integer not null default 0")
@@ -3537,6 +3696,7 @@ def row_to_router(row):
     data["ssh_url"] = f"/ssh/{urllib.parse.quote(data['id'])}/"
     data["config_url"] = f"/router/{urllib.parse.quote(data['id'])}/config"
     data["notes_url"] = f"/router/{urllib.parse.quote(data['id'])}/notes"
+    data["logs_url"] = f"/router/{urllib.parse.quote(data['id'])}/logs"
     data["xray_client_url"] = f"/router/{urllib.parse.quote(data['id'])}/xray-client.json"
     data.pop("status_json", None)
     return data
@@ -3571,6 +3731,7 @@ def router_with_access(router, account):
         "config": bool(can_manage),
         "wol": bool(can_manage),
         "traffic": bool(can_manage),
+        "logs": bool(can_manage),
         "delete": bool(account and account.get("is_owner")),
         "diagnose": bool(can_manage),
     }
@@ -4827,7 +4988,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
 .seasonalFx{{position:fixed;inset:0;display:block;width:100vw;height:100vh;z-index:0;pointer-events:none;opacity:.9;mix-blend-mode:screen}}.desktopHeader{{--hdr-col-1:124px;--hdr-col-2:124px;--hdr-col-3:156px;--hdr-col-4:124px;--hdr-col-5:144px;--hdr-col-6:144px;--hdr-col-7:144px;--hdr-col-8:144px;--top-col-1:256px;--top-col-2:288px;--top-col-3:144px;display:grid;gap:8px;width:max-content;max-width:100%;margin-left:15px}}.desktopHeaderTop{{display:grid;grid-template-columns:var(--top-col-1) var(--top-col-2) var(--top-col-3);align-items:flex-start;gap:8px;width:max-content;max-width:100%;justify-self:start}}.desktopHeaderTop>.appBanner{{width:var(--top-col-1);min-width:var(--top-col-1);max-width:var(--top-col-1)}}.desktopHeaderTop>.routerSearchDock{{width:var(--top-col-2);min-width:var(--top-col-2);max-width:var(--top-col-2)}}.desktopHeaderTop>#seasonDock{{width:var(--top-col-3);min-width:var(--top-col-3);max-width:var(--top-col-3)}}.desktopHeaderBottom{{display:grid;grid-template-columns:var(--hdr-col-1) var(--hdr-col-2) var(--hdr-col-3) var(--hdr-col-4) var(--hdr-col-5) var(--hdr-col-6) var(--hdr-col-7) var(--hdr-col-8);gap:8px;width:max-content;max-width:100%;align-items:start;justify-self:start}}.desktopHeader .appBanner{{grid-column:auto;width:100%;min-width:0}}.desktopHeader .links{{display:grid;grid-column:1/span 3;grid-template-columns:var(--hdr-col-1) var(--hdr-col-2) var(--hdr-col-3);gap:8px;margin-top:0}}.desktopHeader .links a{{width:100%;min-width:0}}.routerSearchDock{{position:relative;display:block;grid-column:auto;width:100%;min-width:0;max-width:100%}}.mobileSearchDock{{display:none;width:100%;position:relative}}.routerSearchToggle{{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;width:100%;padding:8px 14px;border:1px solid rgba(34,211,238,.30);border-radius:999px;background:linear-gradient(110deg,rgba(34,211,238,.12),rgba(124,58,237,.22),rgba(236,72,153,.12));color:#f3e8ff;font-size:13px;font-weight:800;line-height:1;box-shadow:0 10px 24px rgba(124,58,237,.16),inset 0 1px 0 rgba(255,255,255,.10)}}.routerSearchToggle[data-active="true"],.routerSearchToggle[aria-expanded="true"]{{border-color:rgba(34,211,238,.52);box-shadow:0 14px 30px rgba(34,211,238,.14),inset 0 1px 0 rgba(255,255,255,.12)}}.routerSearchToggleIcon{{flex:0 0 auto;color:#c4b5fd;font-size:14px;line-height:1}}.mobileSearchVersion{{display:inline-flex;align-items:center;justify-content:center;min-height:20px;padding:0 7px;border:1px solid rgba(251,113,133,.34);border-radius:999px;background:rgba(251,113,133,.14);color:#fecdd3;font-size:10px;font-weight:900;line-height:1;letter-spacing:.04em;box-shadow:0 0 14px rgba(251,113,133,.14)}}.mobileSearchDock>.mobileSearchVersion{{display:flex;width:fit-content;margin:0 auto 6px}}#routerSearchToggle,#seasonToggle{{border:1px solid var(--line);background:rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.06);color:#f3e8ff}}#routerSearchToggle[data-active="true"],#routerSearchToggle[aria-expanded="true"],#seasonToggle[data-open="true"],#seasonToggle[aria-expanded="true"]{{border-color:var(--line);background:rgba(255,255,255,.11);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}}#routerSearchToggle .routerSearchToggleIcon,#seasonToggle .routerSearchToggleIcon{{color:#ddd6fe}}.routerSearchPanel{{position:absolute;top:calc(100% + 10px);left:0;z-index:55;width:min(296px,calc(100vw - 24px))}}.routerSearchPanel[hidden]{{display:none!important}}.routerSearchCard{{display:grid;grid-template-rows:auto auto auto;align-content:start;gap:8px;width:100%;min-height:82px;padding:12px;border:1px solid rgba(34,211,238,.26);border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.045)),rgba(19,14,32,.96);box-shadow:0 18px 42px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(10px)}}.routerSearchHead{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.routerSearchTitle{{display:block;color:#f3e8ff;font-size:12px;font-weight:900;line-height:1.1}}.routerSearchClear{{min-height:24px;padding:0 9px;border:1px solid rgba(167,139,250,.24);border-radius:999px;background:rgba(255,255,255,.06);color:#ddd6fe;font-size:11px;font-weight:850;cursor:pointer}}.routerSearchClear[disabled]{{opacity:.42;cursor:not-allowed}}.routerSearchField{{display:flex;align-items:center;gap:8px;min-height:38px;padding:0 12px;border:1px solid rgba(34,211,238,.26);border-radius:999px;background:linear-gradient(110deg,rgba(34,211,238,.08),rgba(124,58,237,.14),rgba(236,72,153,.08));box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}}.routerSearchField:focus-within{{border-color:rgba(34,211,238,.54);box-shadow:0 0 0 3px rgba(34,211,238,.10),inset 0 1px 0 rgba(255,255,255,.08)}}.routerSearchField input{{width:100%;padding:0;border:0;background:transparent;color:#f7f2ff;box-shadow:none;outline:none;font-size:13px;font-weight:700}}.routerSearchField input::placeholder{{color:#b9adc9}}.routerSearchIcon{{flex:0 0 auto;color:#c4b5fd;font-size:14px;line-height:1}}.routerSearchMeta{{min-height:14px;color:#c4b5fd;font-size:11px;font-weight:800;line-height:1.2}}.seasonDock{{display:grid;gap:6px;width:100%;padding:9px 10px;border:1px solid rgba(251,191,36,.18);border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.035)),rgba(19,14,32,.90);box-shadow:0 12px 28px rgba(0,0,0,.18);backdrop-filter:blur(10px)}}.seasonLabel{{display:flex;align-items:center;justify-content:center;text-align:center;gap:8px;color:#fde68a;font-size:11px;font-weight:900;line-height:1.1;text-transform:uppercase;letter-spacing:.04em}}.seasonSwitch{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}}.seasonBtn{{min-height:30px;padding:6px 8px;border:1px solid rgba(251,191,36,.22);border-radius:999px;background:rgba(255,255,255,.06);color:#f7f2ff;font-size:11px;font-weight:850;line-height:1;cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease,box-shadow .15s ease,color .15s ease}}.seasonBtn:hover,.seasonBtn:focus-visible{{border-color:rgba(34,211,238,.50);background:rgba(34,211,238,.12);color:#ecfeff}}.seasonBtn[data-active="true"]{{border-color:rgba(251,191,36,.52);background:linear-gradient(110deg,rgba(251,191,36,.22),rgba(34,211,238,.10),rgba(168,85,247,.14));box-shadow:0 10px 20px rgba(251,191,36,.14),inset 0 1px 0 rgba(255,255,255,.08);color:#fff7cc}}.seasonBtn:active{{transform:scale(.98)}}#seasonDock{{position:relative;display:block;grid-column:auto;width:100%;min-width:0;max-width:none;padding:0;border:0;background:none;box-shadow:none;backdrop-filter:none;align-self:start}}.seasonToggle{{min-height:36px;padding:8px 12px;font-size:13px;line-height:1;white-space:normal;text-align:center}}.seasonToggleText{{display:block}}.seasonPanel{{position:absolute;top:calc(100% + 10px);left:0;z-index:56;width:min(320px,calc(100vw - 24px))}}.seasonPanel[hidden]{{display:none!important}}.seasonCard{{display:grid;gap:8px;width:100%;padding:12px;border:1px solid rgba(251,191,36,.18);border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.035)),rgba(19,14,32,.95);box-shadow:0 18px 42px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(12px)}}.headerActions{{display:grid;grid-column:4/span 5;grid-template-columns:var(--hdr-col-4) var(--hdr-col-5) var(--hdr-col-6) var(--hdr-col-7) var(--hdr-col-8);align-self:flex-start;justify-content:flex-start;align-content:flex-start;min-width:0;gap:8px;padding-top:0;max-width:none}}.card{{text-align:center}}.cardTop{{align-items:center;justify-content:center;flex-direction:column}}.tagRow,.actions{{justify-content:center}}.name{{display:inline-flex;align-items:center;justify-content:center;max-width:220px;min-height:34px;margin:0;padding:7px 10px;border:1px solid rgba(251,191,36,.48);border-radius:999px;background:linear-gradient(135deg,rgba(251,191,36,.32),rgba(245,158,11,.22),rgba(255,255,255,.07));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff;font-size:13px;line-height:1;font-weight:900;text-shadow:0 0 16px rgba(251,191,36,.42);box-shadow:0 10px 24px rgba(245,158,11,.10),inset 0 1px 0 rgba(255,255,255,.12)}}.metric{{text-align:center}}.metric.span2{{grid-column:1/-1}}
 @media(max-width:980px){{.cards,.routerGroupCards{{grid-template-columns:repeat(2,minmax(0,1fr))}}.toolbar{{grid-template-columns:1fr 1fr}}.card.main{{grid-column:span 1}}.top{{justify-items:stretch}}.desktopHeader,.desktopHeaderTop,.desktopHeaderBottom{{width:100%;max-width:none}}.desktopHeader{{--hdr-col-1:minmax(0,1fr);--hdr-col-2:minmax(0,1fr);--hdr-col-3:minmax(0,1.35fr);--hdr-col-4:minmax(0,1fr);--hdr-col-5:minmax(0,1fr);--hdr-col-6:minmax(0,1fr);--hdr-col-7:minmax(0,1fr);--hdr-col-8:minmax(0,1fr)}}.headerActions{{width:100%}}}}
 @media(max-width:680px){{body{{font-size:13px;background-attachment:scroll}}.wrap{{padding:10px}}.top{{gap:12px;padding:14px 0;align-items:flex-start}}.brand,.brand>div{{width:100%}}h1{{font-size:22px;line-height:1.18}}.appBanner{{width:auto;max-width:100%;justify-content:center;min-height:36px;padding:8px 12px}}.links,.headerActions,.summary,.mobileOwnerTools{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;gap:8px;max-width:none}}.links{{margin-top:10px}}.links a,.badge,.headerActions .btn,.mobileOwnerTools .btn,.mobileOwnerTools .badge,.miniStat{{width:100%;min-width:0;padding:9px 10px;font-size:12px}}.headerStack{{margin-top:0;width:100%;min-width:0}}.headerStack .badge{{width:100%;min-width:0}}.authMenu{{position:fixed;left:10px;right:10px;top:74px;width:auto;max-height:calc(100svh - 90px);overflow:auto}}.authMenuHead{{min-height:40px;padding:0 104px 8px 0}}.authMenu h2{{margin:2px 104px 0 0;line-height:1.2}}.authMenuClose{{display:inline-flex;top:0;right:0;min-height:32px;padding:6px 12px}}.cards,.routerGroupCards,.toolbar,.authGrid{{grid-template-columns:1fr}}.authRow{{grid-template-columns:1fr;gap:7px;padding:8px}}.authRowTitle{{font-size:13px}}.authRowMeta{{font-size:11px;line-height:1.3}}.authRouterFlags{{justify-content:flex-start;gap:6px}}.authFlagPill{{min-height:25px;padding:3px 7px;gap:5px}}.authFlagPill input{{width:12px;height:12px;flex-basis:12px}}.authFlagPill span{{font-size:10px}}.routerStats{{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-bottom:7px}}.statCard{{min-height:52px;padding:7px 6px}}.statCard span{{font-size:8px;letter-spacing:.015em}}.statCard strong{{font-size:20px}}.statCard em{{display:none}}.statCardHead{{min-height:16px}}.statValueRow,.offlineStatRow{{min-height:20px;margin-top:4px}}.offlineMoreBtn{{right:2px;min-height:16px;padding:0 5px;font-size:7px}}.offlinePopover{{right:3px;width:min(230px,calc(100vw - 20px));padding:8px}}.offlineItem{{padding:6px 7px}}.offlineName{{font-size:10px}}.toolbar{{padding:10px;margin:12px 0}}.card.main{{grid-column:span 1}}.card{{padding:12px;min-height:0}}.card>.metaLine,.card>.tagRow{{display:none}}.nameRow{{gap:6px;margin-top:10px}}.nameRow::before{{flex-basis:26px;width:26px;height:26px}}.name{{font-size:12px;max-width:190px}}.nameEditBtn{{flex-basis:26px;width:26px;height:26px}}.mobilePanelToggle,.routerFormToggle{{display:inline-flex}}.routerSearchDock{{width:100%}}.seasonDock{{width:100%}}#mobileSeasonDock{{width:100%;min-width:0;max-width:none;padding:0;border:0;background:none;box-shadow:none;backdrop-filter:none}}.routerSearchToggle,.seasonToggle{{width:100%}}.routerSearchPanel,.seasonPanel{{position:static;width:100%;margin-top:8px}}.routerSearchCard,.seasonCard{{width:100%;min-height:0;padding:10px 11px;border-radius:16px}}.routerSearchTitle{{font-size:11px}}.routerSearchField{{min-height:36px}}.routerSearchMeta{{text-align:center}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}}.metric{{padding:8px}}.diagnosticPanel{{padding:12px}}.diagnosticTop{{gap:8px}}.diagnosticTop h2{{font-size:17px}}.diagnosticLead{{font-size:11px}}.diagnosticGrid{{grid-template-columns:1fr;gap:10px}}.diagnosticGrid label{{font-size:13px}}.diagnosticGrid textarea{{min-height:118px;padding:12px 13px;font-size:15px;line-height:1.35}}.diagBlock{{padding:11px}}.actions{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.actions .btn,.actions button{{width:100%;min-width:0;padding:9px 8px;font-size:12px}}.wolControls,.trafficControls{{grid-template-columns:1fr}}.wolField span,.wolMeta{{text-align:center}}.wolControls .btn,.wolControls button,.trafficControls .btn,.trafficControls button{{width:100%}}.trafficSummary{{justify-content:center}}.trafficViewport{{max-height:360px;padding-right:0}}.trafficRowTop{{grid-template-columns:1fr}}.trafficTotalBadge{{min-width:0;text-align:left}}}}
-@media(max-width:680px){{.desktopHeader{{display:none}}#hubMenuPanelHost{{display:block;width:100%}}#hubMenuPanelHost:empty{{display:none}}.mobileOwnerTools{{display:grid;margin:0 0 8px}}.mobileOwnerTools[hidden]{{display:none!important}}.top{{padding:6px 0 0;gap:0}}.mobileSearchDock{{display:block;margin:0}}.mobilePanelToggle,.routerFormToggle,.actionToggle{{width:100%;min-height:38px;margin:7px 0;padding:9px 12px;border-radius:999px;font-size:12px;line-height:1}}.actionToggle{{display:inline-flex}}body.preload-mobile-panels .headerActions,body.preload-mobile-panels .routerFormWrap,body.preload-mobile-panels .routerStats,body.preload-mobile-panels .mobileOwnerTools{{display:none!important}}.card .actions.mobileCollapsed:not(.open){{display:none}}.cardTop{{gap:0}}}}
+@media(max-width:680px){{.desktopHeader{{display:none}}#hubMenuPanelHost{{display:block;width:100%}}#hubMenuPanelHost:empty{{display:none}}.mobileOwnerTools{{display:grid;margin:0 0 8px}}.mobileOwnerTools[hidden]{{display:none!important}}.top{{padding:6px 0 0;gap:0}}.mobileSearchDock{{display:block;margin:0}}.mobilePanelToggle,.routerFormToggle,.actionToggle{{width:100%;min-height:38px;margin:7px 0;padding:9px 12px;border-radius:999px;font-size:12px;line-height:1}}.actionToggle{{display:inline-flex}}body.preload-mobile-panels .headerActions,body.preload-mobile-panels .routerFormWrap,body.preload-mobile-panels .mobileOwnerTools{{display:none!important}}.card .actions.mobileCollapsed:not(.open){{display:none}}.cardTop{{gap:0}}}}
 @media(max-width:680px){{.headerActions .badge,.headerActions .btn,.mobileOwnerTools .badge,.mobileOwnerTools .btn{{width:100%;min-width:0;max-width:none}}}}
 @media(max-width:420px){{.links,.headerActions,.summary,.actions,.mobileOwnerTools{{grid-template-columns:1fr}}.metrics{{grid-template-columns:1fr}}.metric.span2{{grid-column:span 1}}}}
 @media(max-width:680px){{.desktopHeader{{width:100%}}.summary{{justify-content:center}}}}
@@ -4861,7 +5022,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
     <div class="brand">
       <div class="desktopHeader">
         <div class="desktopHeaderTop">
-          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v115</span></span></h1>
+          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v116</span></span></h1>
           <div class="routerSearchDock" id="routerSearchDock">
             <button class="routerSearchToggle" id="routerSearchToggle" type="button" aria-expanded="false" aria-controls="routerSearchPanel" data-active="false">
               <span>Поиск роутеров</span>
@@ -5214,7 +5375,7 @@ systemctl restart owrt-remote-xray</pre>
       </div>
     </div>
     <div class="mobileSearchDock" id="mobileRouterSearchDock">
-      <span class="mobileSearchVersion">v115</span>
+      <span class="mobileSearchVersion">v116</span>
       <button class="routerSearchToggle mobilePanelToggle primary" id="mobileRouterSearchToggle" type="button" aria-expanded="false" aria-controls="mobileRouterSearchPanel" data-active="false">
         <span>Поиск роутеров</span>
       </button>
@@ -5296,7 +5457,7 @@ systemctl restart owrt-remote-xray</pre>
     <div class="formMsg" id="routerGroupMsg" hidden></div>
   </section>
 
-  <button class="mobilePanelToggle primary" id="routerStatsToggle" type="button" hidden>Открыть статистику</button>
+  <button class="mobilePanelToggle primary" id="routerStatsToggle" type="button" aria-expanded="true" aria-controls="routerStats" hidden>Скрыть статистику</button>
   <section id="routerStats" class="routerStats" aria-label="Статистика роутеров"></section>
   <section id="cards" class="cards"></section>
   <section id="diagnosticPanel" class="diagnosticPanel" hidden>
@@ -7724,6 +7885,9 @@ function render(list) {{
     const notesButton = !!permissions.notes
       ? `<a class="btn" href="${{escapeAttr(r.notes_url || ('/router/' + encodeURIComponent(r.id) + '/notes'))}}" target="_blank" rel="noopener noreferrer">Заметки</a>`
       : `<span class="btn disabled">Заметки</span>`;
+    const logsButton = !!permissions.logs
+      ? `<a class="btn" data-global-logs-link="true" href="${{escapeAttr(r.logs_url || ('/router/' + encodeURIComponent(r.id) + '/logs'))}}" target="_blank" rel="noopener noreferrer">Глобал логи</a>`
+      : `<span class="btn disabled">Глобал логи</span>`;
     const renameLabel = 'Переименовать ' + (r.name || r.id || 'роутер');
     const renameButton = !!permissions.manage
       ? `<button class="nameEditBtn" type="button" data-rename="${{escapeAttr(r.id)}}" aria-label="${{escapeAttr(renameLabel)}}" title="${{escapeAttr(renameLabel)}}"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 17.25V21h3.75l11-11.03-3.75-3.75zm17.71-10.04a1.003 1.003 0 0 0 0-1.42l-2.5-2.5a1.003 1.003 0 0 0-1.42 0l-1.96 1.96 3.75 3.75z"/></svg></button>`
@@ -7762,6 +7926,7 @@ function render(list) {{
         ${{adminButton}}
         ${{sshButton}}
         ${{wolButton}}
+        ${{logsButton}}
         ${{permissions.config ? `<a class="btn" href="${{escapeAttr(r.config_url)}}">OpenWrt config</a>` : '<span class="btn disabled">OpenWrt config</span>'}}
         ${{permissions.delete ? `<button class="btn" data-delete="${{escapeAttr(r.id)}}">Удалить</button>` : '<span class="btn disabled">Удалить</span>'}}
       </div>
@@ -7926,6 +8091,9 @@ render = function(list) {{
     const notesButton = !!permissions.notes
       ? `<a class="btn" href="${{escapeAttr(r.notes_url || ('/router/' + encodeURIComponent(r.id) + '/notes'))}}" target="_blank" rel="noopener noreferrer">Заметки</a>`
       : `<span class="btn disabled">Заметки</span>`;
+    const logsButton = !!permissions.logs
+      ? `<a class="btn" data-global-logs-link="true" href="${{escapeAttr(r.logs_url || ('/router/' + encodeURIComponent(r.id) + '/logs'))}}" target="_blank" rel="noopener noreferrer">Глобал логи</a>`
+      : `<span class="btn disabled">Глобал логи</span>`;
     const renameLabel = 'Переименовать ' + (r.name || r.id || 'роутер');
     const renameButton = !!permissions.manage
       ? `<button class="nameEditBtn" type="button" data-rename="${{escapeAttr(r.id)}}" aria-label="${{escapeAttr(renameLabel)}}" title="${{escapeAttr(renameLabel)}}"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 17.25V21h3.75l11-11.03-3.75-3.75zm17.71-10.04a1.003 1.003 0 0 0 0-1.42l-2.5-2.5a1.003 1.003 0 0 0-1.42 0l-1.96 1.96 3.75 3.75z"/></svg></button>`
@@ -7982,6 +8150,7 @@ render = function(list) {{
         ${{sshButton}}
         ${{wolButton}}
         ${{notesButton}}
+        ${{logsButton}}
         ${{permissions.config ? `<a class="btn" href="${{escapeAttr(r.config_url)}}">OpenWrt config</a>` : '<span class="btn disabled">OpenWrt config</span>'}}
         ${{permissions.delete ? `<button class="btn" data-delete="${{escapeAttr(r.id)}}">Удалить</button>` : '<span class="btn disabled">Удалить</span>'}}
       </div>
@@ -8489,7 +8658,7 @@ if (routerFormToggle) {{
 initRouterFormToggle();
 syncHubMenuPlacement();
 initMobilePanelToggle(hubMenuToggle, headerActions, 'Открыть меню хаба', 'Скрыть меню хаба');
-initMobilePanelToggle(routerStatsToggle, routerStats, 'Открыть статистику', 'Скрыть статистику');
+initMobilePanelToggle(routerStatsToggle, routerStats, 'Открыть статистику', 'Скрыть статистику', false);
 document.body.classList.remove('preload-mobile-panels');
 
 async function handleXrayReload() {{
@@ -12014,6 +12183,74 @@ window.setTimeout(focusTerminal, 80);
 </html>"""
 
 
+def router_logs_html(router):
+    title = html.escape(str(router.get('name') or router['id']))
+    endpoint = json.dumps('/api/router/' + urllib.parse.quote(router['id'], safe='') + '/logs')
+    download = html.escape('/api/router/' + urllib.parse.quote(router['id'], safe='') + '/logs/download', quote=True)
+    return '''<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Глобал логи — __TITLE__</title><style>
+:root{color-scheme:dark;--bg:#07040f;--grid:rgba(168,85,247,.13)}
+*{box-sizing:border-box}body{min-height:100vh;margin:0;overflow-x:hidden;background-color:var(--bg);background-image:radial-gradient(circle at 16% 10%,rgba(168,85,247,.45),transparent 30%),radial-gradient(circle at 88% 16%,rgba(59,130,246,.28),transparent 32%),linear-gradient(145deg,#07040f,#120a24 48%,#05030a),repeating-linear-gradient(0deg,transparent 0 30px,var(--grid) 31px),repeating-linear-gradient(90deg,transparent 0 30px,var(--grid) 31px);background-attachment:fixed;color:#f5f3ff;font:14px/1.5 system-ui,sans-serif}
+.wrap{max-width:1150px;margin:auto;padding:20px}.panel{padding:18px;border:1px solid #574267;border-radius:12px;background:#191226}
+.head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}h1{font-size:22px;margin:0}h2{margin:4px 0 12px;font-size:16px;overflow-wrap:anywhere}
+.note{margin:12px 0;padding:10px 12px;background:#f59e0b1a;border:1px solid #f59e0b59;border-left:3px solid #f59e0b;border-radius:8px;color:#fde68a;font-size:12px}
+.actions,.legend{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:9px 14px;color:#f5f3ff;background:#393044;border:1px solid #655574;border-radius:8px;font:700 13px system-ui;cursor:pointer;text-decoration:none}.btn:disabled{opacity:.5;cursor:wait}.bad{border-color:#ef444470}
+.legend{font-size:12px;font-weight:700;gap:14px}.ok{color:#86efac}.warn{color:#fde68a}.error{color:#f87171}
+#logsDiagnosis{margin:12px 0;padding:10px 12px;border:1px solid currentColor;border-radius:8px;overflow-wrap:anywhere}
+#logsText{margin:12px 0 0;min-height:200px;max-height:65vh;overflow:auto;padding:12px;background:#0d0917;border:1px solid #514065;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:12px/1.5 ui-monospace,Consolas,monospace}.line{display:block}#logsStatus{color:#d2c3e0;font-size:12px;overflow-wrap:anywhere}
+@media(max-width:600px){.wrap{padding:12px}.panel{padding:12px}.actions{display:grid;grid-template-columns:1fr}.actions .btn{width:100%}.head .btn{width:100%}h1{font-size:20px}}
+@media(max-width:680px),(pointer:coarse){body{background-attachment:scroll;background-image:linear-gradient(145deg,#07040f,#120a24 54%,#05030a)}.legend{justify-content:center;text-align:center;row-gap:8px}}
+</style></head><body><main class="wrap"><section class="panel">
+<div class="head"><h1>Глобал логи</h1><a class="btn" href="/">Вернуться в Hub</a></div><h2>__TITLE__</h2>
+<blockquote class="note">Действия панели, Heartbeat, WAN, предупреждения и ошибки Xray этого роутера. Копия доставляется на VPS каждые 3 секунды, пока доступна связь. Если роутер оффлайн, доступны последние доставленные записи. На роутере журнал хранится только в ОЗУ и очищается после перезагрузки и каждые 24 часа. Архив VPS сохраняется отдельно: до 2 МБ на роутер. Ключи и пароли скрываются.</blockquote>
+<div class="legend" aria-label="Цвета журнала"><span class="ok">● Успешно</span><span class="warn">● Предупреждение</span><span class="error">● Ошибка</span></div>
+<div class="actions"><a class="btn" href="__DOWNLOAD__">Скачать логи</a><button class="btn" id="logsLive" type="button">Запустить в реальном времени</button><button class="btn bad" id="logsClear" type="button">Очистить логи</button></div>
+<div id="logsDiagnosis" class="warn" role="status">Получаю состояние роутера…</div><div id="logsStatus" role="status">Загружаю сохранённые записи с VPS…</div><pre id="logsText" tabindex="0">Загрузка записей журнала…</pre>
+</section></main><script>
+(function(){
+  const endpoint=__ENDPOINT__, output=document.getElementById('logsText'), status=document.getElementById('logsStatus'), diagnosis=document.getElementById('logsDiagnosis'), live=document.getElementById('logsLive'), clear=document.getElementById('logsClear');
+  let running=false, timer=null, controller=null, generation=0, lastText=null;
+  function tone(line){if(/^\\[ERROR\\]/.test(line))return 'error';if(/^\\[WARN\\]/.test(line))return 'warn';return 'ok';}
+  function render(text){
+    if(lastText===text && output.querySelector('.line'))return;
+    const bottom=output.scrollHeight-output.clientHeight-output.scrollTop<24, top=output.scrollTop, fragment=document.createDocumentFragment();
+    const lines=text ? text.replace(/\\r\\n/g,'\\n').replace(/\\n$/,'').split('\\n') : ['Журнал пока пуст. Записи появятся после установки фикса на роутер и первой доставки на VPS.'];
+    lines.forEach(line=>{const span=document.createElement('span');span.className='line '+tone(line);span.textContent=line||' ';fragment.appendChild(span);});
+    output.replaceChildren(fragment);lastText=text;output.scrollTop=bottom?output.scrollHeight:top;
+  }
+  function stamp(value){return value ? new Date(value*1000).toLocaleString() : 'ещё не доставлялись';}
+  function showDiagnosis(data){const value=data.diagnosis||{};diagnosis.className=['ok','warn','error'].includes(value.level)?value.level:'warn';diagnosis.textContent=(value.text||'Сведения о причине пока не получены.')+(value.at?' · Подтверждено: '+stamp(value.at):'');}
+  function stop(){running=false;generation++;if(timer!==null)clearTimeout(timer);timer=null;if(controller)controller.abort();controller=null;live.textContent='Запустить в реальном времени';live.setAttribute('aria-pressed','false');}
+  async function refresh(once){
+    if(document.hidden || (!running&&!once))return;
+    const current=generation, request=new AbortController();controller=request;const timeout=setTimeout(()=>request.abort(),10000);
+    try{
+      const response=await fetch(endpoint,{cache:'no-store',signal:request.signal});
+      if(!response.ok)throw new Error('HTTP '+response.status);
+      const data=await response.json();if(current!==generation)return;
+      render(data.text||'');
+      showDiagnosis(data);
+      status.textContent=(data.online?'Роутер онлайн':'Роутер оффлайн — показан архив VPS')+' · Последняя доставка: '+stamp(data.last_sync)+' · Объём архива: '+Math.ceil(data.bytes/1024)+' КБ'+(data.bytes>65536?' · На экране последние 64 КБ; полный журнал доступен через «Скачать логи».':'')+(data.pending_clear?' · Очистка журнала роутера ожидает связи.':'');
+    }catch(error){if(current===generation)status.textContent='Не удалось получить логи: '+error.message+(running?'. Повтор через 3 секунды.':'');}
+    finally{clearTimeout(timeout);if(controller===request)controller=null;if(current===generation&&running&&!document.hidden)timer=setTimeout(refresh,3000);}
+  }
+  live.addEventListener('click',()=>{if(running){stop();return;}stop();running=true;live.textContent='Остановить просмотр';live.setAttribute('aria-pressed','true');refresh();});
+  clear.addEventListener('click',async()=>{
+    const resume=running;stop();clear.disabled=true;live.disabled=true;const request=new AbortController(), timeout=setTimeout(()=>request.abort(),10000);
+    try{
+      const response=await fetch(endpoint+'/clear',{method:'POST',cache:'no-store',signal:request.signal});
+      if(!response.ok)throw new Error('HTTP '+response.status);
+      const data=await response.json();render('');showDiagnosis(data);status.textContent=data.message;
+    }catch(error){status.textContent='Не удалось очистить логи: '+error.message;}
+    finally{clearTimeout(timeout);clear.disabled=false;live.disabled=false;if(resume){running=true;live.textContent='Остановить просмотр';live.setAttribute('aria-pressed','true');refresh();}}
+  });
+  document.addEventListener('visibilitychange',()=>{generation++;if(timer!==null)clearTimeout(timer);timer=null;if(controller)controller.abort();if(running&&!document.hidden)refresh();});
+  window.addEventListener('pagehide',stop);refresh(true);
+})();
+</script></body></html>'''.replace('__TITLE__', title).replace('__DOWNLOAD__', download).replace('__ENDPOINT__', endpoint)
+
+
 def router_notes_html(router, username="", saved="", error="", draft=None, edit_note_id=""):
     router = dict(router or {})
     router_id = str(router.get("id") or "").strip()
@@ -12578,7 +12815,7 @@ button:hover{{filter:brightness(1.06)}}
       <form class="login" method="post" action="/login">
     {error_html}
     <span class="brand">
-      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v115</span></span></h1>
+      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v116</span></span></h1>
     </span>
     <label for="hubUsername">Логин</label>
     <input id="hubUsername" name="username" autocomplete="off" autofocus required>
@@ -13050,7 +13287,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;background:li
                 <circle cx="65" cy="59" r="3" fill="#E5F2FF"/>
               </svg>
             </div>
-            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v115</span></h2>
+            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v116</span></h2>
           </div>
         </div>
         <div class="brandBottom">
@@ -14109,6 +14346,8 @@ class App:
             if not new:
                 continue
             if bool(old.get("online")) and not bool(new.get("online")):
+                with self.conn() as conn:
+                    record_router_connection_log(conn, router_id, False)
                 notify_router_offline(new.get("router") or {})
 
     def router_state_monitor_loop(self):
@@ -15581,6 +15820,58 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
             "text/html; charset=utf-8",
             [("Set-Cookie", current_router_cookie(router_id))],
         )
+
+    def router_logs_page(self, router_id):
+        if not self.require_router_access(router_id, 'G'):
+            return
+        with self.app.conn() as conn:
+            row = get_active_router(conn, router_id)
+        if not row:
+            self.send_text(404, 'router not found')
+            return
+        self.send_bytes(200, router_logs_html(row_to_router(row)).encode('utf-8'), 'text/html; charset=utf-8',
+                        [('Cache-Control', 'no-store')])
+
+    def router_logs_api(self, router_id, mode='live'):
+        if not self.require_router_access(router_id, 'G', json_mode=True):
+            return
+        with self.app.conn() as conn:
+            row = get_active_router(conn, router_id)
+            if not row:
+                self.send_json(404, {'ok': False, 'error': 'router not found'})
+                return
+            if mode == 'clear':
+                clear_router_log_archive(conn, router_id)
+                snapshot, raw = router_log_snapshot(conn, router_id)
+            else:
+                snapshot, raw = router_log_snapshot(conn, router_id)
+            router = row_to_router(row)
+        if mode == 'download':
+            name = clean_router_id(router_id)
+            filename = f'owrt-remote-global-{name}-{dt.datetime.now().strftime("%Y%m%d-%H%M%S")}.log'
+            self.send_bytes(200, raw, 'text/plain; charset=utf-8',
+                            [('Cache-Control', 'no-store'), ('Content-Disposition', f'attachment; filename="{filename}"')])
+        else:
+            payload = {'ok': True, 'router_id': router_id, 'online': router['online'], **snapshot}
+            if mode == 'clear':
+                payload['message'] = 'Архив VPS очищен. Журнал роутера будет очищен при следующем соединении.'
+            self.send_json(200, payload)
+
+    def receive_router_logs_api(self):
+        if not self.agent_ok():
+            self.send_json(401, {'ok': False, 'error': 'bad agent token'})
+            return
+        try:
+            if self.headers.get('Transfer-Encoding') or not 0 < int(self.headers.get('Content-Length', '0')) <= 100000:
+                self.close_connection = True
+                self.send_json(413, {'ok': False, 'error': 'log request is too large or has no length'})
+                return
+            payload = self.read_payload()
+            with self.app.conn() as conn:
+                reply = receive_router_logs(conn, payload.get('id'), payload.get('batch'), payload.get('state'))
+            self.send_json(200, {'ok': True, **reply})
+        except Exception as exc:
+            self.send_json(400, {'ok': False, 'error': str(exc)})
 
     def router_notes_page(self, router_id, error="", draft=None, status=200, edit_note_id=""):
         if not self.require_router_access(router_id, "A"):
@@ -17246,6 +17537,10 @@ exit 127
                 return
             self.send_json(200, push_status_snapshot())
             return
+        log_match = re.fullmatch(r'/api/router/([^/]+)/logs(?:/(download))?', path)
+        if log_match:
+            self.router_logs_api(urllib.parse.unquote(log_match[1]), log_match[2] or 'live')
+            return
         if path.startswith("/api/router/") and path.endswith("/wol/devices"):
             parts = path.strip("/").split("/")
             if len(parts) != 5 or parts[0] != "api" or parts[1] != "router" or parts[3] != "wol" or parts[4] != "devices":
@@ -17266,6 +17561,9 @@ exit 127
                 self.send_json(400, {"ok": False, "error": str(exc), "router_id": router_id, "devices": []})
             return
         if path.startswith("/router/"):
+            if path.endswith('/logs'):
+                self.router_logs_page(self.router_id_from_path('/router/'))
+                return
             if "/notes-media/" in path:
                 self.router_note_media_page(path)
                 return
@@ -17302,6 +17600,9 @@ exit 127
         if path.startswith("/api/ssh-session/"):
             self.ssh_session_action(path)
             return
+        if path == '/api/router-logs':
+            self.receive_router_logs_api()
+            return
         if path == "/api/heartbeat":
             if not self.agent_ok():
                 self.send_json(401, {"ok": False, "error": "bad agent token"})
@@ -17310,6 +17611,8 @@ exit 127
                 payload = self.read_payload()
                 with self.app.conn() as conn:
                     router = heartbeat(conn, payload)
+                    if router and router.get('_became_online'):
+                        record_router_connection_log(conn, router['id'], True)
                 if router and router.pop("_became_online", False):
                     notify_router_online(router)
                 xray_reload = None
@@ -17346,6 +17649,10 @@ exit 127
         if self.maybe_proxy_luci_absolute(path):
             return
         if not self.require_admin():
+            return
+        log_match = re.fullmatch(r'/api/router/([^/]+)/logs/clear', path)
+        if log_match:
+            self.router_logs_api(urllib.parse.unquote(log_match[1]), 'clear')
             return
         if path == "/api/auth":
             if not self.require_owner():
@@ -17901,6 +18208,7 @@ exit 127
                         "update routers set deleted_at = ?, updated_at = ? where id = ?",
                         (ts, ts, router_id),
                     )
+                    conn.execute('delete from router_logs where router_id = ?', (router_id,))
                     conn.commit()
                     deleted = True
             if deleted:

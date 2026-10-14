@@ -43,7 +43,7 @@ class GlobalLogsDeploymentTests(unittest.TestCase):
         mappings['/etc/init.d/rpcd'] = (self.root / 'etc/init.d/rpcd').as_posix()
         mappings['/etc/init.d/uhttpd'] = (self.root / 'etc/init.d/uhttpd').as_posix()
         mappings['/tmp/owrt-remote-logs'] = (self.root / 'journal').as_posix()
-        mappings['/root/owrt-remote-backup-before-global-logs-v115'] = self.backup.as_posix()
+        mappings['/root/owrt-remote-backup-before-global-logs-stop-v116'] = self.backup.as_posix()
         pattern = '|'.join(re.escape(target) for target in sorted(mappings, key=len, reverse=True))
         self.script = re.sub(pattern, lambda match: mappings[match.group()], self.script)
         # Existing sandbox service scripts only print markers. Mock readiness.
@@ -51,6 +51,7 @@ class GlobalLogsDeploymentTests(unittest.TestCase):
 logread() { return 0; }
 ubus() { printf '{"running": true}\\n'; }
 mkfifo() { return 0; }
+jsonfilter() { return 0; }
 logger() { printf '%s\\n' "$3" | sh "$TEST_LOG_HELPER" append; }
 '''
         self.script = self.script.replace('for item in cgi agent init;', mocks + '\nfor item in cgi agent init;', 1)
@@ -73,6 +74,7 @@ logger() { printf '%s\\n' "$3" | sh "$TEST_LOG_HELPER" append; }
                 text = (ROOT / source).read_text(encoding='utf-8')
                 if item == 'logs.sh':
                     text = text.replace('log_clock() { cut -d. -f1 /proc/uptime; }', 'log_clock() { echo 1000; }')
+                    text = text.replace('log_ram_storage() {', 'log_ram_storage() { return 0;', 1)
                 if item == 'logs-init':
                     text = '#!/bin/sh\necho logs-service-$1\n'
                 if bad and item == 'cgi':
@@ -101,7 +103,7 @@ logger() { printf '%s\\n' "$3" | sh "$TEST_LOG_HELPER" append; }
             self.assertIn('GLOBAL_LOGS_ROUTER_Install_OK', result.stdout)
             for item in ('cgi', 'luci'):
                 installed = self.root / self.targets[item].lstrip('/')
-                self.assertIn('v115', installed.read_text(encoding='utf-8'))
+                self.assertIn('v116', installed.read_text(encoding='utf-8'))
             for item, data in self.initial.items():
                 self.assertEqual(self.backup.joinpath(item).read_bytes(), data)
         result = self.deploy('Rollback')
@@ -126,6 +128,21 @@ logger() { printf '%s\\n' "$3" | sh "$TEST_LOG_HELPER" append; }
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Restoring files from this attempt.', result.stderr)
         self.assert_initial()
+
+    def test_rollback_restores_existing_log_service_and_helper(self):
+        # This fix is normally applied on top of v116's already installed journal.
+        for item in ('logs.sh', 'logs-init'):
+            target = self.root / self.targets[item].lstrip('/')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('#!/bin/sh\necho previous-' + item + '-$1\n', encoding='utf-8', newline='\n')
+            self.initial[item] = target.read_bytes()
+        result = self.deploy('Install')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.deploy('Rollback')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for item, data in self.initial.items():
+            self.assertEqual((self.root / self.targets[item].lstrip('/')).read_bytes(), data)
+        self.assertIn('previous-logs-init-start', result.stdout)
 
 
 if __name__ == '__main__':

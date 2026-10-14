@@ -7,6 +7,13 @@ const { chromium } = require('playwright');
 const root = path.resolve('.test-output/global-logs');
 let text = Array.from({length: 150}, (_, i) => `Heartbeat ${i}: OK`).join('\n');
 let reads = 0, clears = 0;
+function sampleLogs() {
+  return '[ERROR] Heartbeat: ошибка; connection refused\n[WARN] Xray missing, retry in 5s\n'
+    + '[OK] Heartbeat: OK; Hub=https://hub.example\n'
+    + 'daemon.err owrt-remote[123]: Xray: запуск туннеля\n'
+    + '[Warning] core: Xray 26.3.27 started\n'
+    + Array.from({length: 150}, (_, i) => `[OK] Heartbeat ${i}: OK`).join('\n');
+}
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.searchParams.get('action') === 'logs_live') {
@@ -29,7 +36,7 @@ const server = http.createServer((req, res) => {
   const browser = await chromium.launch({headless: true, channel: 'chrome'});
   try {
     for (const mobile of [false, true]) {
-      text = Array.from({length: 150}, (_, i) => `Heartbeat ${i}: OK`).join('\n');
+      text = sampleLogs();
       const page = await browser.newPage({viewport: mobile ? {width: 390, height: 844} : {width: 1280, height: 900}});
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -59,6 +66,13 @@ const server = http.createServer((req, res) => {
       await page.locator('#globalLogsToggle').click();
       assert.equal(await page.locator('#globalLogsPanel').isVisible(), true);
       await page.waitForFunction(() => document.querySelector('#globalLogsText').textContent.includes('Heartbeat 149'));
+      const rows = page.locator('#globalLogsText .globalLogLine');
+      assert.equal(await rows.nth(0).evaluate(el => getComputedStyle(el).color), 'rgb(248, 113, 113)');
+      assert.equal(await rows.nth(1).evaluate(el => getComputedStyle(el).color), 'rgb(253, 230, 138)');
+      for (const index of [2, 3, 4]) {
+        assert.equal(await rows.nth(index).evaluate(el => getComputedStyle(el).color), 'rgb(134, 239, 172)');
+      }
+      assert.equal(await page.locator('.globalLogsLegend span').count(), 3);
       assert.equal(reads, beforeOpen + 1, 'opening displays existing records immediately');
       assert.equal(await page.locator('#globalLogsLive').textContent(), 'Запустить в реальном времени');
       await page.waitForTimeout(3300);
@@ -66,6 +80,8 @@ const server = http.createServer((req, res) => {
       await page.locator('#globalLogsLive').click();
       await page.waitForFunction(() => document.querySelector('#globalLogsText').textContent.includes('Heartbeat 149'));
       assert.equal(await page.locator('#globalLogsLive').textContent(), 'Остановить просмотр');
+      await page.locator('#globalLogsText').evaluate(el => el.scrollTop = 0);
+      await page.screenshot({path: path.join(root, mobile ? 'mobile-colors.png' : 'desktop-colors.png'), fullPage: true});
       await page.locator('#globalLogsText').evaluate(el => {el.scrollTop = 40;});
       text += '\nnew event\n<script>window.bad=1</script>';
       await page.waitForFunction(() => document.querySelector('#globalLogsText').textContent.includes('new event'));

@@ -600,6 +600,7 @@ post_json http://hub.example/api/heartbeat test-token "$TEST_ROOT/payload"
         result = self.run_shell("render_client_config --stdout")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
+        self.assertEqual(config['log'], {'access': 'none', 'error': '', 'loglevel': 'warning'})
         for outbound in config["outbounds"]:
             if outbound["tag"].startswith("vps-"):
                 self.assertEqual(outbound["streamSettings"]["sockopt"], {"mark": 2097152, "interface": "pppoe-wan"})

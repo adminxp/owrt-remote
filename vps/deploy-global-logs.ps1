@@ -13,7 +13,7 @@ $RemoteScript = @'
 #!/bin/sh
 set -eu
 stage=/tmp/__UPLOAD_NAME__
-backup=/root/owrt-remote-backup-before-global-logs-v115
+backup=/root/owrt-remote-backup-before-global-logs-stop-v116
 items='cgi agent init logs.sh logs-init luci'
 changed=0
 phase=preflight
@@ -101,9 +101,13 @@ if [ '__ACTION__' = Install ]; then
     command -v logread >/dev/null
     command -v ubus >/dev/null
     command -v mkfifo >/dev/null
+    command -v base64 >/dev/null
+    command -v jsonfilter >/dev/null
     grep -F -q 'globalLogsToggle' "$stage/cgi"
-    for item in cgi luci; do grep -F -q 'v115' "$stage/$item"; done
+    for item in cgi luci; do grep -F -q 'v116' "$stage/$item"; done
     grep -F -q 'LOG_KEEP_SECONDS=86400' "$stage/logs.sh"
+    grep -F -q 'log_sync_loop' "$stage/logs.sh"
+    grep -F -q 'sync_global_logs' "$stage/agent"
     phase=backup
     if [ ! -e "$backup" ]; then save_files "$stage/retained"; mv "$stage/retained" "$backup"; fi
     validate_backup "$backup" || { echo "Incomplete backup: $backup. Nothing changed." >&2; exit 1; }
