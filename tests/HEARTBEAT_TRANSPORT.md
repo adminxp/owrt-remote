@@ -1,4 +1,4 @@
-# Heartbeat: HTTPS, авторизация и диагностика (v116)
+# Heartbeat: HTTPS, авторизация и диагностика (v117)
 
 ## Разбор сбоя 15.10.2026
 
@@ -82,7 +82,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\k.zolotarev95\
 Обновляются агент и WAN helper. Перезапускается только экземпляр Heartbeat
 под procd; Xray и удалённый туннель скрипт не перезапускает. Остановленный
 экземпляр остаётся остановленным. Резервная копия первых файлов сохраняется
-в `/root/owrt-remote-backup-before-heartbeat-transport-v116`.
+в `/root/owrt-remote-backup-before-heartbeat-transport-v117`.
 Маркер `HEARTBEAT_TRANSPORT_ROUTER_Install_OK` подтверждает установку кода,
 а доступность Hub проверяется отдельно:
 

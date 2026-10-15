@@ -13,7 +13,7 @@ $RemoteScript = @'
 #!/bin/sh
 set -eu
 stage=/tmp/__UPLOAD_NAME__
-backup=/root/owrt-remote-backup-before-global-logs-stop-v116
+backup=/root/owrt-remote-backup-before-global-logs-stop-v117
 items='cgi agent init logs.sh logs-init luci'
 changed=0
 phase=preflight
@@ -104,7 +104,7 @@ if [ '__ACTION__' = Install ]; then
     command -v base64 >/dev/null
     command -v jsonfilter >/dev/null
     grep -F -q 'globalLogsToggle' "$stage/cgi"
-    for item in cgi luci; do grep -F -q 'v116' "$stage/$item"; done
+    for item in cgi luci; do grep -F -q 'v117' "$stage/$item"; done
     grep -F -q 'LOG_KEEP_SECONDS=86400' "$stage/logs.sh"
     grep -F -q 'log_sync_loop' "$stage/logs.sh"
     grep -F -q 'sync_global_logs' "$stage/agent"
@@ -131,7 +131,8 @@ if [ '__ACTION__' = Install ]; then
         sleep 1
     done
     if [ "$ready" != 1 ]; then echo 'Log collector did not start.' >&2; logread -e owrt-remote | tail -n 30 >&2; exit 1; fi
-    marker='Глобал логи: collector-__UPLOAD_NAME__'
+    # Generate UTF-8 on the router; Windows PowerShell 5.1 reads scripts as ANSI.
+    marker="$(printf '\320\223\320\273\320\276\320\261\320\260\320\273\040\320\273\320\276\320\263\320\270\072') collector-__UPLOAD_NAME__"
     ready=0
     for attempt in 1 2 3 4 5; do
         logger -t owrt-remote "$marker"

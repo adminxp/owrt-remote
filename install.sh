@@ -214,6 +214,12 @@ install_xray_runtime() {
 	"$remote_bin" install-xray-tmp || die "failed to install Xray to /tmp"
 }
 
+# Stop the old log writer before replacing its storage code. Its bounded legacy
+# archive is migrated by the new log service, without moving any other /tmp data.
+if [ "${ROOT%/}" = "" ] && [ -x /etc/init.d/owrt-remote-logs ]; then
+	/etc/init.d/owrt-remote-logs stop || true
+fi
+
 install_file "usr/sbin/owrt-remote" 0755
 install_file "usr/lib/owrt-remote/wan.sh" 0644
 install_file "usr/lib/owrt-remote/logs.sh" 0644

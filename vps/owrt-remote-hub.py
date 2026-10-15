@@ -3087,6 +3087,38 @@ ROUTER_LOG_MAX_BYTES = 2 * 1024 * 1024
 ROUTER_LOG_BATCH_MAX_BYTES = 65536
 
 
+def router_log_storage(db_path):
+    """Describe the archive's real backing mount, including symlinked DB paths."""
+    path = Path(db_path).resolve()
+    result = {'path': str(path), 'filesystem': 'unknown', 'persistent': None,
+              'limit_bytes': ROUTER_LOG_MAX_BYTES}
+    if sys.platform != 'linux':
+        return result
+    def unescape(value):
+        return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), value)
+    try:
+        mounts = []
+        with open('/proc/self/mountinfo', encoding='utf-8') as source:
+            for line in source:
+                fields, separator, tail = line.partition(' - ')
+                left, right = fields.split(), tail.split()
+                if not separator or len(left) < 6 or len(right) < 3:
+                    continue
+                mount = Path(unescape(left[4]))
+                if path.is_relative_to(mount):
+                    mounts.append((len(mount.parts), right[0], left[5]))
+        if mounts:
+            _, filesystem, flags = max(mounts, key=lambda item: item[0])
+            persistent = (False if filesystem in {'tmpfs', 'ramfs', 'rootfs'} else
+                          True if filesystem in {'ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'f2fs',
+                                                 'jfs', 'zfs', 'ubifs', 'jffs2', 'nfs', 'nfs4', 'ceph'} else None)
+            result.update(filesystem=filesystem, persistent=persistent,
+                          writable='rw' in flags.split(','))
+    except OSError:
+        pass
+    return result
+
+
 def redact_router_log_bytes(raw):
     """Defense in depth: do not archive credentials supplied by older agents."""
     secret = re.compile(rb'authorization|hub_token|vless_uuid|ssh_vless_uuid|password|passwd|web[._ -]?key|[?&](?:key|token)=|"(?:uuid|privatekey)"|[0-9a-f]{8}-[0-9a-f-]{27,}', re.I)
@@ -3137,6 +3169,12 @@ def receive_router_logs(conn, router_id, batch, state=None):
         conn.execute('update router_logs set last_sync = ? where router_id = ?', (ts, router_id))
         return {'journal_id': journal_id, 'offset': end, 'clear_request': pending}
     cursor = int(row['cursor']) if row['journal_id'] == journal_id else 0
+    # A status-only packet cannot prove delivery of any journal bytes. Older
+    # helpers sent from=to=total even when every chunk was skipped. Acknowledging
+    # that number permanently hid the retained records and invented rotation gaps.
+    if not raw and not pending:
+        conn.execute('update router_logs set last_sync = ? where router_id = ?', (ts, router_id))
+        return {'journal_id': journal_id, 'offset': cursor, 'clear_request': ''}
     if not pending and row['journal_id'] == journal_id and end <= cursor:
         conn.execute('update router_logs set last_sync = ? where router_id = ?', (ts, router_id))
         return {'journal_id': journal_id, 'offset': cursor, 'clear_request': ''}
@@ -3145,7 +3183,7 @@ def receive_router_logs(conn, router_id, batch, state=None):
         cursor = start
         stored = b''
     elif row['journal_id'] and row['journal_id'] != journal_id:
-        stored += ('[OK] ' + iso_time(ts) + ' Роутер начал новый журнал: перезагрузка или очистка в ОЗУ.\n').encode('utf-8')
+        stored += ('[OK] ' + iso_time(ts) + ' Роутер начал новый журнал: очистка или восстановление сохранённой истории.\n').encode('utf-8')
     if start > cursor:
         stored += ('[WARN] ' + iso_time(ts) + ' Часть записей не доставлена до ротации журнала на роутере.\n').encode('utf-8')
     if end > cursor:
@@ -4968,11 +5006,16 @@ body::before{{content:"";position:fixed;inset:-25%;z-index:0;pointer-events:none
 .brand{{display:flex;align-items:center;gap:14px;width:100%;min-width:0}}
 h1{{margin:0;font-size:29px;line-height:1.2;letter-spacing:0}}.appBanner{{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;min-width:132px;padding:8px 14px;border:1px solid rgba(34,211,238,.38);border-radius:999px;background:linear-gradient(110deg,rgba(34,211,238,.14),rgba(124,58,237,.24),rgba(236,72,153,.14));color:#f3e8ff;text-decoration:none;font-weight:800;font-size:13px;line-height:1;white-space:nowrap;box-shadow:0 10px 24px rgba(124,58,237,.16),inset 0 1px 0 rgba(255,255,255,.10);overflow:hidden}}.appBanner::before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.20),transparent);transform:translateX(-120%);animation:bannerShine 6.2s ease-in-out infinite}}.appBanner span{{position:relative}}.appBannerVersion{{color:#fb7185;text-shadow:0 0 12px rgba(251,113,133,.35)}}.muted{{color:var(--muted)}}.top p{{margin:4px 0 0}}.links,.headerActions{{display:flex;align-items:center;gap:8px}}.links{{margin-top:0;flex-wrap:nowrap}}.links a,.badge{{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;min-width:132px;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.08);color:#f3e8ff;text-decoration:none;font-weight:800;font-size:13px;line-height:1;white-space:nowrap;overflow:hidden}}.headerActions{{position:relative;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));align-self:flex-start;justify-content:flex-start;align-content:flex-start;flex:1 1 auto;min-width:0;gap:8px;padding-top:0;max-width:none}}.headerActions .badge,.headerActions .btn{{width:100%;min-height:36px;min-width:0;padding:8px 10px;border-radius:999px;font-weight:800;font-size:12px;line-height:1;white-space:nowrap}}.headerActions .btn[href="/logout"]{{margin-left:0}}.badge{{background:rgba(255,255,255,.08);color:#f3e8ff;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}}.nethavenTop{{border-color:rgba(34,211,238,.46);background:linear-gradient(110deg,rgba(14,165,233,.20),rgba(168,85,247,.22),rgba(34,197,94,.14));color:#ecfeff;box-shadow:0 10px 24px rgba(14,165,233,.14),inset 0 1px 0 rgba(255,255,255,.10)}}.nethavenTop::before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.24),transparent);transform:translateX(-120%);animation:bannerShine 6.2s ease-in-out infinite;pointer-events:none}}.authToggle{{cursor:pointer}}.dot{{width:9px;height:9px;border-radius:999px;background:var(--red);box-shadow:0 0 13px rgba(251,113,133,.72)}}.dot.on{{background:var(--green);box-shadow:0 0 13px rgba(34,197,94,.75)}}.dot.warn{{background:var(--amber);box-shadow:0 0 13px rgba(245,158,11,.75)}}
   .toolbar{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) minmax(84px,.52fr) minmax(100px,.65fr) minmax(0,1fr) minmax(0,1fr) minmax(116px,.68fr);gap:8px;margin:18px 0;padding:14px 16px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.045)),var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 18px 46px rgba(0,0,0,.20);backdrop-filter:blur(10px);width:100%;max-width:100%;box-sizing:border-box}}.toolbar>*{{width:100%;min-width:0}}.toolbar input,.toolbar select{{background:rgba(255,255,255,.08);border-color:var(--line);color:#f3e8ff;box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}}.toolbar input::placeholder{{color:#b9adc9}}
+@media(min-width:681px){{
+  #routerForm select,#routerGroupFilter{{color-scheme:dark}}
+  #routerForm select option,#routerGroupFilter option{{background-color:#221a34;color:#f7f2ff}}
+  #routerForm select option:checked,#routerGroupFilter option:checked{{background-color:#7c3aed;color:#fff}}
+}}
 .authMenu{{position:absolute;right:0;top:calc(100% + 10px);z-index:60;width:min(640px,calc(100vw - 44px));max-height:min(820px,calc(100svh - 120px));overflow:auto;padding:16px;background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.05)),rgba(19,14,32,.96);border:1px solid var(--line);border-radius:8px;box-shadow:0 24px 70px rgba(0,0,0,.36);backdrop-filter:blur(12px);scrollbar-width:thin}}.authMenu[hidden]{{display:none}}.authMenu>h2,.authMenu>p{{display:none}}.authMenuHead{{position:relative;display:block}}.authMenuHead>div{{min-width:0}}.authMenuHead p{{display:none}}.authMenu h2{{margin:0 0 4px;font-size:18px}}.authMenuClose{{display:none;position:absolute;top:14px;right:14px;min-height:34px;padding:7px 12px;border-radius:999px;white-space:nowrap}}.authMenu p{{margin:0 0 12px;color:var(--muted)}}.authGrid{{display:grid;grid-template-columns:1fr;gap:10px}}.authGrid .wide{{grid-column:1/-1}}.msg{{margin-top:10px;color:#bbf7d0;font-weight:750}}.msg.bad{{color:#fecdd3}}.formMsg{{margin:-8px 0 18px;padding:10px 12px;border:1px solid rgba(34,197,94,.34);border-radius:8px;background:rgba(34,197,94,.12);color:#bbf7d0;font-weight:800}}.formMsg.bad{{border-color:rgba(251,113,133,.4);background:rgba(251,113,133,.13);color:#fecdd3}}
 .authGroup{{margin-top:14px;border:1px solid rgba(34,211,238,.22);border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03)),rgba(15,10,26,.78);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}}.authGroupSummary{{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;cursor:pointer;list-style:none}}.authGroupSummary::-webkit-details-marker{{display:none}}.authGroupTitle strong{{display:block;color:#f7f2ff;font-size:15px;font-weight:900;line-height:1.15}}.authGroupTitle span{{display:block;margin-top:4px;color:var(--muted);font-size:12px;line-height:1.35}}.authGroupChevron{{display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;border:1px solid rgba(34,211,238,.24);border-radius:999px;background:rgba(34,211,238,.08);color:#dbeafe;font-size:16px;line-height:1;transition:transform .18s ease,background .18s ease,border-color .18s ease}}.authGroup[open] .authGroupChevron{{transform:rotate(180deg);background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.24)}}.authGroupBody{{padding:0 14px 14px;border-top:1px solid rgba(255,255,255,.08)}}.authGroupBody>.authPasswordSection{{margin-top:14px;padding-top:0;border-top:0}}.authGroupBody>.authOverview{{margin-top:0;padding-top:14px;border-top:0}}.authGroupBody>.sessionBox{{margin-top:14px;padding-top:0;border-top:0}}.authGroupBody>.notifyBox{{margin-top:14px;padding-top:0;border-top:0}}.authGroupBody>.backupBox{{margin-top:14px;padding-top:0;border-top:0}}.authOverview{{display:grid;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}}.authPills{{display:flex;flex-wrap:wrap;gap:8px}}.authPill{{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid rgba(34,211,238,.24);border-radius:999px;background:rgba(34,211,238,.08);color:#dbeafe;font-size:12px;font-weight:850}}.authPill.off{{border-color:rgba(255,255,255,.10);background:rgba(255,255,255,.06);color:#c4b5fd}}.authSection{{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}}.authSectionHead{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}}.authSectionHead h3{{margin:0;font-size:15px}}.authSectionHead p{{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.35}}.authSectionState{{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:6px 10px;border:1px solid rgba(34,197,94,.30);border-radius:999px;background:rgba(34,197,94,.12);color:#bbf7d0;font-size:12px;font-weight:850;white-space:nowrap}}.authSectionState.off{{border-color:rgba(255,255,255,.10);background:rgba(255,255,255,.06);color:#c4b5fd}}.authSectionState.warn{{border-color:rgba(251,191,36,.28);background:rgba(251,191,36,.11);color:#fde68a}}.authFields{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}.authFields .wide{{grid-column:1/-1}}.authFields input,.authFields textarea{{width:100%;min-width:0}}.authFields textarea{{min-height:92px;resize:vertical}}.authActions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}}.authActions .sessionBtn,.authActions .btn,.authActions button{{flex:1 1 180px}}.authHint{{margin:8px 0 0;color:var(--muted);font-size:12px;line-height:1.35}}.authRememberToggle{{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:7px 11px;border:1px solid rgba(255,255,255,.10);border-radius:999px;background:rgba(255,255,255,.05);color:var(--muted);font-size:12px;font-weight:750;cursor:pointer;user-select:none}}.authRememberToggle input{{width:14px;height:14px;margin:0;flex:0 0 14px;accent-color:#22c55e}}.authSecretBox{{margin-top:10px;padding:10px;border:1px solid rgba(34,211,238,.24);border-radius:8px;background:rgba(34,211,238,.08)}}.authSecretBox strong{{display:block;margin-bottom:6px;font-size:12px;color:#f7f2ff}}.authSecretValue{{margin:0;padding:9px 10px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:rgba(0,0,0,.18);color:#c4b5fd;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-word}}.authList{{display:grid;gap:8px;margin-top:10px}}.authRow{{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.055);padding:9px}}.authRowAll{{border-style:dashed;background:linear-gradient(135deg,rgba(34,211,238,.10),rgba(34,197,94,.08),rgba(255,255,255,.04))}}.authRowTitle{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-weight:900}}.authRowMeta{{margin-top:4px;color:var(--muted);font-size:12px;line-height:1.35;word-break:break-word}}.authRowKey{{margin-top:7px;padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:7px;background:rgba(0,0,0,.18);color:#c4b5fd;font:11px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all}}.authRouterFlags{{justify-content:flex-end}}.authFlagPill{{gap:6px;min-height:30px;padding:5px 8px;cursor:pointer;user-select:none;touch-action:manipulation}}.authFlagPill input{{width:14px;height:14px;margin:0;flex:0 0 14px;accent-color:#22c55e}}.authFlagPill span{{font-size:11px;font-weight:900;line-height:1}}.authEmpty{{padding:10px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);text-align:center}}.authDanger{{color:#fecdd3}}.authSocialIdentity{{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center}}.authSocialAvatar{{width:38px;height:38px;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.05);display:grid;place-items:center;color:#dbeafe;font-size:15px;font-weight:900}}.authSocialAvatar img{{display:block;width:100%;height:100%;object-fit:cover}}.authSocialName{{font-weight:900;color:#f7f2ff}}.authSocialHandle{{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.35;word-break:break-word}}
 .sessionBox{{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}}.sessionHead{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}}.sessionHead h3{{margin:0;font-size:15px}}.sessionList{{display:grid;gap:8px;max-height:260px;overflow:auto;padding-right:2px}}.sessionRow{{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.055);padding:9px;text-align:left}}.sessionTitle{{display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-weight:900}}.sessionMeta{{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.35;word-break:break-word}}.sessionCurrent{{border:1px solid rgba(34,197,94,.38);border-radius:999px;padding:2px 7px;color:#bbf7d0;background:rgba(34,197,94,.13);font-size:11px}}.sessionBtn{{padding:7px 9px;font-size:12px;border-radius:999px}}.sessionEmpty{{padding:10px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);text-align:center}}
 .notifyBox{{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}}.notifyActions{{display:flex;gap:7px;align-items:center;justify-content:flex-end;flex-wrap:wrap}}.notifyHint{{margin:-4px 0 10px;color:var(--muted);font-size:12px;line-height:1.35}}.notifyList{{display:grid;gap:8px;max-height:260px;overflow:auto;padding-right:2px}}.notifyRow{{border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.055);padding:9px;text-align:left}}.notifyTitle{{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:950}}.notifyTitle span:first-child{{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.notifyTime{{color:var(--muted);font-size:11px;font-weight:750;white-space:nowrap}}.notifyBody{{margin-top:4px;color:#ddd6fe;font-size:12px;line-height:1.35;word-break:break-word}}.notifyDetails{{margin:7px 0 0;padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:7px;background:rgba(0,0,0,.18);color:#c4b5fd;font:11px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;max-height:92px;overflow:auto}}.notifyRow.warn{{border-color:rgba(245,158,11,.34);background:rgba(245,158,11,.08)}}.notifyRow.bad{{border-color:rgba(251,113,133,.38);background:rgba(251,113,133,.09)}}.notifyBtn.on{{border-color:rgba(34,197,94,.36);background:rgba(34,197,94,.15);color:#bbf7d0}}
-.backupBox{{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}}.backupGrid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}.backupGrid .wide{{grid-column:1/-1}}.backupGrid input[type=file]{{padding:8px;background:rgba(8,5,18,.72);border:1px solid var(--line);border-radius:8px;color:#ddd6fe;min-width:0}}.backupHint{{margin:0 0 10px;color:var(--muted);font-size:12px;line-height:1.35}}.backupCmds{{display:grid;gap:8px;margin-top:10px}}.backupCmd{{border:1px solid rgba(255,255,255,.10);border-radius:8px;background:rgba(0,0,0,.18);padding:9px}}.backupCmd strong{{display:block;margin-bottom:5px;color:#f7f2ff;font-size:12px}}.backupCmd pre{{margin:0;white-space:pre-wrap;word-break:break-word;color:#c4b5fd;font:11px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace}}#backupRewrite{{border-color:rgba(251,191,36,.42);background:linear-gradient(135deg,rgba(251,191,36,.28),rgba(245,158,11,.22));color:#fff7cc;box-shadow:0 10px 24px rgba(245,158,11,.14),inset 0 1px 0 rgba(255,255,255,.12)}}#backupRewrite:hover{{border-color:rgba(251,191,36,.56);background:linear-gradient(135deg,rgba(251,191,36,.34),rgba(245,158,11,.28))}}.backupMsg{{margin-top:9px;color:#bbf7d0;font-size:12px;font-weight:800;line-height:1.35}}.backupMsg.bad{{color:#fecdd3}}
+.backupBox{{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}}.backupGrid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}.backupGrid .wide{{grid-column:1/-1}}.backupGrid input[type=file]{{padding:8px;background:rgba(8,5,18,.72);border:1px solid var(--line);border-radius:8px;color:#ddd6fe;min-width:0}}.backupHint{{margin:0 0 10px;color:var(--muted);font-size:12px;line-height:1.35}}#backupRewrite{{border-color:rgba(251,191,36,.42);background:linear-gradient(135deg,rgba(251,191,36,.28),rgba(245,158,11,.22));color:#fff7cc;box-shadow:0 10px 24px rgba(245,158,11,.14),inset 0 1px 0 rgba(255,255,255,.12)}}#backupRewrite:hover{{border-color:rgba(251,191,36,.56);background:linear-gradient(135deg,rgba(251,191,36,.34),rgba(245,158,11,.28))}}.backupMsg{{margin-top:9px;color:#bbf7d0;font-size:12px;font-weight:800;line-height:1.35}}.backupMsg.bad{{color:#fecdd3}}
 input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding:10px 11px;background:rgba(8,5,18,.72);color:var(--text)}}button,.btn{{border:1px solid rgba(255,255,255,.10);border-radius:8px;padding:10px 13px;background:rgba(255,255,255,.10);color:#f7f2ff;font-weight:850;text-decoration:none;cursor:pointer;display:inline-flex;justify-content:center;align-items:center}}.authToggle{{border-radius:999px;padding:8px 14px;background:rgba(255,255,255,.08);color:#f3e8ff}}button.primary,.btn.primary{{background:var(--blue);color:#fff;box-shadow:0 10px 22px rgba(124,58,237,.22)}}button.bad,.btn.bad{{background:rgba(251,113,133,.16);color:#fecdd3}}.btn.good{{background:rgba(34,197,94,.16);color:#bbf7d0}}.btn.disabled{{opacity:.45;cursor:not-allowed}}
 .summary{{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}}.miniStat{{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;min-width:132px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.07);padding:8px 12px;color:#ddd6fe;font-weight:800;font-size:13px;line-height:1;white-space:nowrap}}
 .routerStats{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start;gap:8px;margin:0 0 10px}}.statCard{{position:relative;min-height:54px;overflow:hidden;border:1px solid var(--line);border-radius:8px;padding:8px 10px 7px;background:linear-gradient(180deg,rgba(255,255,255,.075),rgba(255,255,255,.04)),var(--panel);box-shadow:0 8px 20px rgba(0,0,0,.14);text-align:center;box-sizing:border-box}}.statCard::before{{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:var(--cyan)}}.statCard span{{display:block;color:var(--muted);font-size:10px;font-weight:850;text-transform:uppercase;letter-spacing:.035em}}.statCard strong{{display:block;margin-top:0;font-size:22px;line-height:1;color:#f7f2ff}}.statCard em{{display:block;min-width:0;margin-top:2px;padding:0 2px;color:#c4b5fd;font-style:normal;font-size:10px;line-height:1.15}}.statCard.online::before{{background:var(--green)}}.statCard.online strong{{color:#bbf7d0}}.statCard.offline::before{{background:var(--red)}}.statCard.offline strong{{color:#fecdd3}}.statCard.total::before{{background:var(--cyan)}}.statCard.total strong{{color:#a5f3fc}}.statCardHead{{display:flex;align-items:center;justify-content:center;min-height:14px}}.statCard.has-popover{{overflow:visible;z-index:12}}.statValueRow,.offlineStatRow{{position:relative;display:flex;align-items:center;justify-content:center;min-height:20px;margin-top:3px}}.offlineMoreBtn{{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;justify-content:center;min-height:22px;padding:0 8px;border:1px solid rgba(251,113,133,.34);border-radius:999px;background:rgba(251,113,133,.12);color:#fecdd3;font-size:10px;font-weight:900;line-height:1;cursor:pointer;white-space:nowrap}}.offlineMoreBtn[aria-expanded="true"]{{background:rgba(251,113,133,.18);border-color:rgba(251,113,133,.48)}}.offlinePopover{{position:absolute;top:calc(100% + 8px);right:6px;width:min(340px,calc(100vw - 30px));padding:10px;border:1px solid rgba(251,113,133,.28);border-radius:12px;background:linear-gradient(180deg,rgba(49,28,44,.98),rgba(30,18,40,.98));box-shadow:0 22px 50px rgba(0,0,0,.34);text-align:left;z-index:25}}.offlinePopover[hidden]{{display:none!important}}.offlineList{{display:grid;gap:6px;max-height:170px;overflow:auto;padding-right:2px}}.offlineItem{{border:1px solid rgba(251,113,133,.18);border-radius:8px;padding:7px 8px;background:rgba(251,113,133,.08)}}.offlineName{{display:block;color:#fdf2f8;font-size:11px;font-weight:900;line-height:1.25;text-transform:none;letter-spacing:0}}
@@ -5022,7 +5065,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
     <div class="brand">
       <div class="desktopHeader">
         <div class="desktopHeaderTop">
-          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v116</span></span></h1>
+          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v117</span></span></h1>
           <div class="routerSearchDock" id="routerSearchDock">
             <button class="routerSearchToggle" id="routerSearchToggle" type="button" aria-expanded="false" aria-controls="routerSearchPanel" data-active="false">
               <span>Поиск роутеров</span>
@@ -5334,29 +5377,6 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
                   <a class="sessionBtn btn good" id="backupDownload" href="/api/backup/download">Скачать</a>
                 </div>
                 <div class="backupHint">Архив переносит БД роутеров, логин, токены Hub/агента, push-ключи и уведомления. Для переезда на другой IP укажи новый VPS host/Public URL перед восстановлением.</div>
-                <div class="backupCmds">
-                  <div class="backupCmd">
-                    <strong>1. Сделать backup на старой VPS</strong>
-                    <pre>/opt/owrt-remote/owrt-remote-hub.py backup --out /root/owrt-hub-backup.tar.gz</pre>
-                  </div>
-                  <div class="backupCmd">
-                    <strong>2. Поднять Hub на новой VPS</strong>
-                    <pre>curl -fsSL "https://raw.githubusercontent.com/kzolotarev95/luci-app-owrt-remote/main/vps/install-vps.sh?v=$(date +%s)" | sh</pre>
-                  </div>
-                  <div class="backupCmd">
-                    <strong>3. Перенести архив на новую VPS</strong>
-                    <pre>scp /root/owrt-hub-backup.tar.gz root@NEW_IP:/root/owrt-hub-backup.tar.gz</pre>
-                  </div>
-                  <div class="backupCmd">
-                    <strong>4. Восстановить на новой VPS с новым IP/domain</strong>
-                    <pre>/opt/owrt-remote/owrt-remote-hub.py restore --file /root/owrt-hub-backup.tar.gz --vps-host NEW_IP_OR_DOMAIN --public-url https://NEW_DOMAIN</pre>
-                  </div>
-                  <div class="backupCmd">
-                    <strong>5. Применить после restore</strong>
-                    <pre>systemctl restart owrt-remote
-systemctl restart owrt-remote-xray</pre>
-                  </div>
-                </div>
                 <div class="backupGrid">
                   <input class="wide" id="backupFile" type="file" accept=".gz,.tgz,.tar.gz,application/gzip,application/x-gzip">
                   <input id="backupVpsHost" placeholder="Новый VPS host/IP">
@@ -5375,7 +5395,7 @@ systemctl restart owrt-remote-xray</pre>
       </div>
     </div>
     <div class="mobileSearchDock" id="mobileRouterSearchDock">
-      <span class="mobileSearchVersion">v116</span>
+      <span class="mobileSearchVersion">v117</span>
       <button class="routerSearchToggle mobilePanelToggle primary" id="mobileRouterSearchToggle" type="button" aria-expanded="false" aria-controls="mobileRouterSearchPanel" data-active="false">
         <span>Поиск роутеров</span>
       </button>
@@ -12203,10 +12223,10 @@ def router_logs_html(router):
 @media(max-width:680px),(pointer:coarse){body{background-attachment:scroll;background-image:linear-gradient(145deg,#07040f,#120a24 54%,#05030a)}.legend{justify-content:center;text-align:center;row-gap:8px}}
 </style></head><body><main class="wrap"><section class="panel">
 <div class="head"><h1>Глобал логи</h1><a class="btn" href="/">Вернуться в Hub</a></div><h2>__TITLE__</h2>
-<blockquote class="note">Действия панели, Heartbeat, WAN, предупреждения и ошибки Xray этого роутера. Копия доставляется на VPS каждые 3 секунды, пока доступна связь. Если роутер оффлайн, доступны последние доставленные записи. На роутере журнал хранится только в ОЗУ и очищается после перезагрузки и каждые 24 часа. Архив VPS сохраняется отдельно: до 2 МБ на роутер. Ключи и пароли скрываются.</blockquote>
+<blockquote class="note">Действия панели, Heartbeat, WAN, предупреждения и ошибки Xray этого роутера. Доставка проверяется каждые 3 секунды; новые записи обычно появляются после пакетной записи на Flash, до 60 секунд. На обновлённом роутере журнал сохраняется на проверенной Flash, временный буфер ограничен 16 КиБ. Если роутер оффлайн, доступны последние доставленные записи. Архив VPS хранится в SQLite на диске: до 2 МиБ на роутер. Ключи и пароли скрываются.</blockquote>
 <div class="legend" aria-label="Цвета журнала"><span class="ok">● Успешно</span><span class="warn">● Предупреждение</span><span class="error">● Ошибка</span></div>
 <div class="actions"><a class="btn" href="__DOWNLOAD__">Скачать логи</a><button class="btn" id="logsLive" type="button">Запустить в реальном времени</button><button class="btn bad" id="logsClear" type="button">Очистить логи</button></div>
-<div id="logsDiagnosis" class="warn" role="status">Получаю состояние роутера…</div><div id="logsStatus" role="status">Загружаю сохранённые записи с VPS…</div><pre id="logsText" tabindex="0">Загрузка записей журнала…</pre>
+<div id="logsDiagnosis" class="warn" role="status">Получаю состояние роутера…</div><div id="logsStorage" role="status"></div><div id="logsStatus" role="status">Загружаю сохранённые записи с VPS…</div><pre id="logsText" tabindex="0">Загрузка записей журнала…</pre>
 </section></main><script>
 (function(){
   const endpoint=__ENDPOINT__, output=document.getElementById('logsText'), status=document.getElementById('logsStatus'), diagnosis=document.getElementById('logsDiagnosis'), live=document.getElementById('logsLive'), clear=document.getElementById('logsClear');
@@ -12231,6 +12251,8 @@ def router_logs_html(router):
       const data=await response.json();if(current!==generation)return;
       render(data.text||'');
       showDiagnosis(data);
+      const storage=data.storage, storageLabel=document.getElementById('logsStorage');
+      if(storage){storageLabel.className=storage.persistent===false?'error':storage.persistent===true?'ok':'warn';storageLabel.textContent=(storage.persistent===false?'Внимание: архив VPS находится в RAM и исчезнет после перезагрузки.':storage.persistent===true?'Архив VPS: постоянный диск.':'Архив VPS: тип хранилища не подтверждён.')+' '+storage.path+' · '+storage.filesystem+' · Лимит: 2 МиБ на роутер.';}
       status.textContent=(data.online?'Роутер онлайн':'Роутер оффлайн — показан архив VPS')+' · Последняя доставка: '+stamp(data.last_sync)+' · Объём архива: '+Math.ceil(data.bytes/1024)+' КБ'+(data.bytes>65536?' · На экране последние 64 КБ; полный журнал доступен через «Скачать логи».':'')+(data.pending_clear?' · Очистка журнала роутера ожидает связи.':'');
     }catch(error){if(current===generation)status.textContent='Не удалось получить логи: '+error.message+(running?'. Повтор через 3 секунды.':'');}
     finally{clearTimeout(timeout);if(controller===request)controller=null;if(current===generation&&running&&!document.hidden)timer=setTimeout(refresh,3000);}
@@ -12815,7 +12837,7 @@ button:hover{{filter:brightness(1.06)}}
       <form class="login" method="post" action="/login">
     {error_html}
     <span class="brand">
-      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v116</span></span></h1>
+      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v117</span></span></h1>
     </span>
     <label for="hubUsername">Логин</label>
     <input id="hubUsername" name="username" autocomplete="off" autofocus required>
@@ -13287,7 +13309,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;background:li
                 <circle cx="65" cy="59" r="3" fill="#E5F2FF"/>
               </svg>
             </div>
-            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v116</span></h2>
+            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v117</span></h2>
           </div>
         </div>
         <div class="brandBottom">
@@ -15852,7 +15874,8 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
             self.send_bytes(200, raw, 'text/plain; charset=utf-8',
                             [('Cache-Control', 'no-store'), ('Content-Disposition', f'attachment; filename="{filename}"')])
         else:
-            payload = {'ok': True, 'router_id': router_id, 'online': router['online'], **snapshot}
+            payload = {'ok': True, 'router_id': router_id, 'online': router['online'],
+                       'storage': router_log_storage(self.app.db_path), **snapshot}
             if mode == 'clear':
                 payload['message'] = 'Архив VPS очищен. Журнал роутера будет очищен при следующем соединении.'
             self.send_json(200, payload)

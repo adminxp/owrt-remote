@@ -35,6 +35,7 @@ const server = http.createServer((req, res) => {
     reads++;
     res.setHeader('Content-Type', 'application/json');
     return res.end(JSON.stringify({ok:true, online:false, text, bytes:Buffer.byteLength(text), last_sync:1791954000,
+      storage:{path:'/var/lib/owrt-remote/hub.db',filesystem:'ext4',persistent:true},
       diagnosis:{level:'warn',text:'Remote выключен на роутере. Туннель и Heartbeat остановлены.',at:1791954000}}));
   }
   if (url.pathname === '/api/router/main/logs/clear') {
@@ -95,6 +96,8 @@ const server = http.createServer((req, res) => {
       text=initialText();const before=reads;
       await page.goto(`http://127.0.0.1:${server.address().port}/router/main/logs`);
       await page.waitForFunction(()=>document.querySelector('#logsText').textContent.includes('Event 119'));
+      assert((await page.locator('#logsStorage').textContent()).includes('Архив VPS: постоянный диск.'));
+      assert((await page.locator('#logsStorage').textContent()).includes('/var/lib/owrt-remote/hub.db'));
       assert.deepEqual(await page.locator('body').evaluate(el=>{
         const s=getComputedStyle(el);return {image:s.backgroundImage,color:s.backgroundColor,attachment:s.backgroundAttachment};
       }),terminalBackground,'log page uses the VPS terminal background');

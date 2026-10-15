@@ -951,6 +951,13 @@ post_json() (
 	die "для heartbeat нужен uclient-fetch, wget или curl"
 )
 
+log_post_json_bounded() (
+	# Also bounds remote_curl_post's private response body. The subshell limit
+	# cannot affect heartbeat/Xray. POSIX -f uses 512-byte blocks (32 KiB here).
+	ulimit -f 64 || exit 1
+	post_json "$1" "$2" "$3"
+)
+
 global_logs_state() {
 	local enabled xray
 	enabled=false; xray=stopped
@@ -960,13 +967,17 @@ global_logs_state() {
 }
 
 sync_global_logs() (
-	local helper router_id batch file response endpoint base token journal offset clear_token rc sync_lock owner attempt
+	local helper router_id file response endpoint base token journal offset clear_token rc sync_lock owner attempt runtime TMPDIR stale
 	helper="${OWRT_REMOTE_LOG_HELPER:-/usr/lib/owrt-remote/logs.sh}"
 	[ -r "$helper" ] || return 0
 	token="$(uci_get hub_token '')"; [ -n "$token" ] || return 0
 	# The journal is independent of Remote's enabled flag and Xray lifecycle.
 	sh "$helper" check || return 1
-	sync_lock="${OWRT_REMOTE_LOG_DIR:-/tmp/owrt-remote-logs}/sync-lock"
+	runtime="${OWRT_REMOTE_LOG_RUNTIME:-/tmp/owrt-remote-log-runtime}"
+	# Older helpers create only their journal directory. An independent agent
+	# update still needs a private runtime directory for delivery and its lock.
+	(umask 077; mkdir -p "$runtime") || return 1
+	sync_lock="$runtime/sync-lock"
 	if ! mkdir "$sync_lock" 2>/dev/null; then
 		# Give a sender time to write its PID, then recover an abandoned lock.
 		for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -975,23 +986,56 @@ sync_global_logs() (
 		done
 		owner="$(cat "$sync_lock/pid" 2>/dev/null)"
 		case "$owner" in ''|*[!0-9]*) ;; *) kill -0 "$owner" 2>/dev/null && return 0 ;; esac
-		rm -f "$sync_lock/pid"; rmdir "$sync_lock" 2>/dev/null || return 0
+		if ! mkdir "$sync_lock/reap" 2>/dev/null; then
+			owner="$(cat "$sync_lock/reap/pid" 2>/dev/null)"
+			case "$owner" in ''|*[!0-9]*) sleep 1 ;; *) kill -0 "$owner" 2>/dev/null && return 0 ;; esac
+			rm -f "$sync_lock/reap/pid"; rmdir "$sync_lock/reap" 2>/dev/null || return 0
+			return 0
+		fi
+		printf '%s\n' "$$" >"$sync_lock/reap/pid"
+		owner="$(cat "$sync_lock/pid" 2>/dev/null)"
+		case "$owner" in ''|*[!0-9]*) ;; *) if kill -0 "$owner" 2>/dev/null; then rm -f "$sync_lock/reap/pid"; rmdir "$sync_lock/reap"; return 0; fi ;; esac
+		rm -f "$sync_lock/pid"
+		rm -f "$sync_lock/reap/pid"
+		rmdir "$sync_lock/reap" || return 0
+		rmdir "$sync_lock" 2>/dev/null || return 0
 		mkdir "$sync_lock" 2>/dev/null || return 0
 	fi
-	printf '%s\n' "$$" >"$sync_lock/pid"
+	# ash keeps $$ unchanged inside a subshell. Store the actual sender PID so
+	# a killed sender is recoverable while its parent service is still alive.
+	if read -r owner attempt </proc/self/stat 2>/dev/null; then
+		printf '%s\n' "$owner" >"$sync_lock/pid"
+	else
+		printf '%s\n' "$$" >"$sync_lock/pid"
+	fi
 	file=''; response=''
 	trap 'rm -f "$file" "$response" "$sync_lock/pid"; rmdir "$sync_lock" 2>/dev/null || true' EXIT
 	trap 'exit 1' INT TERM
+	# A killed sender can leave one bounded payload; reclaim it under the singleton.
+	rm -f "$runtime"/sync.*
+	# Give this sender its own temporary HTTP directory; never sweep heartbeat's
+	# files. Clean a curl subprocess killed before its EXIT trap could run.
+	TMPDIR="$runtime/http"; export TMPDIR
+	mkdir -p "$TMPDIR" || return 1
+	for stale in "$TMPDIR"/owrt-remote-http.*; do
+		[ -d "$stale" ] || continue
+		rm -f "$stale/body" "$stale/stats" "$stale/error" "$stale/dns"
+		rmdir "$stale" 2>/dev/null || true
+	done
 	if truthy "$(uci_get wan_direct 0)" && [ ! -s "$WAN_STATE/active-interface" ]; then wan_prepare || return 1; fi
-	batch="$(sh "$helper" export)" || return 1
 	router_id="$(safe_id "$(uci_get router_id main)")"
-	# export verifies that this directory is on tmpfs; payloads also stay in RAM.
+	# Export at most 16 KiB of raw records directly into a bounded request file.
+	# Neither the Flash journal nor a base64 packet is copied into a shell variable.
 	umask 077
-	file="${OWRT_REMOTE_LOG_DIR:-/tmp/owrt-remote-logs}/sync.$$"; response="$file.response"
-	printf '{"id":%s,"batch":%s,"state":%s}\n' "$(json_string "$router_id")" "$batch" "$(global_logs_state)" >"$file"
+	file="$runtime/sync.$$"; response="$file.response"
+	{
+		printf '{"id":%s,"batch":' "$(json_string "$router_id")"
+		sh "$helper" export || exit 1
+		printf ',"state":%s}\n' "$(global_logs_state)"
+	} >"$file" || return 1
 	for endpoint in $(heartbeat_candidate_endpoints); do
 		base="$(heartbeat_base_from_endpoint "$endpoint")"
-		if post_json "$base/api/router-logs" "$token" "$file" >"$response" 2>/dev/null &&
+		if log_post_json_bounded "$base/api/router-logs" "$token" "$file" >"$response" 2>/dev/null &&
 			grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
 			journal="$(jsonfilter -i "$response" -e '@.journal_id' 2>/dev/null)"
 			offset="$(jsonfilter -i "$response" -e '@.offset' 2>/dev/null)"
@@ -1136,8 +1180,9 @@ heartbeat_diagnostics() {
 	if [ -r "$state" ]; then cat "$state"; else printf 'Замеров пока нет; выполни owrt-remote heartbeat.\n'; fi
 }
 
-send_heartbeat() (
+send_heartbeat() {
 	local hub_url token endpoint tmp response event used fallback_base errors rc dir metrics http attempt max_attempts reason previous previous_reason safe_endpoint elapsed started diagnostic
+	(
 	event="${1:-}"
 	hub_url="$(uci_get hub_url '')"
 	token="$(uci_get hub_token '')"
@@ -1210,17 +1255,94 @@ send_heartbeat() (
 	[ "$used" = "1" ] || die "hub_url/public_url/vps_host пустые"
 	case "$hub_url" in https://*) log 'Heartbeat: fallback остановлен; reason=https_required; автоматический переход на HTTP отключён' ;; esac
 	return 1
-)
+	)
+}
 
 wan_reconcile_xray() {
 	local config bound device
+	truthy "$(uci_get enabled 0)" || return 0
+	device="$(wan_device)" || return 1
+	if ! xray_running; then
+		wan_recover_xray
+		return $?
+	fi
 	config="$(uci_get xray_config /etc/xray/owrt-remote-client.json)"
 	[ -r "$config" ] || return 0
 	bound="$(jsonfilter -i "$config" -e '@.outbounds[@.tag="vps-interconn"].streamSettings.sockopt.interface' 2>/dev/null)"
-	device="$(wan_device)" || return 1
 	[ "$bound" != "$device" ] || return 0
-	xray_running || return 0
 	wan_reconnect_xray "$bound" "$device"
+}
+
+wan_recover_xray() {
+	local lock owner rest state running heartbeat now last attempt
+	(
+	umask 077
+	lock="${TMPDIR:-/tmp}/owrt-remote-xray-recovery"
+	# A stopped procd instance cannot be revived by sending it a signal.
+	# Serialize re-registration; do not interrupt the healthy heartbeat instance.
+	attempt=0
+	while ! mkdir "$lock" 2>/dev/null; do
+		owner="$(cat "$lock/pid" 2>/dev/null)"
+		case "$owner" in
+			''|*[!0-9]*)
+				# Allow a new worker to record its PID before reaping an empty lock.
+				if [ "$attempt" -lt 10 ]; then attempt=$((attempt+1)); sleep 0.1; continue; fi ;;
+			*) kill -0 "$owner" 2>/dev/null && return 0 ;;
+		esac
+		wan_recovery_reap "$lock" "$attempt"
+		attempt=$((attempt+1)); [ "$attempt" -lt 20 ] || return 0
+	done
+	trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true' EXIT
+	trap 'exit 1' INT TERM
+	owner=$$
+	# ash keeps $$ unchanged in a subshell; /proc/self identifies this worker.
+	if [ -r /proc/self/stat ]; then read -r owner rest </proc/self/stat || owner=$$; fi
+	printf '%s\n' "$owner" >"$lock/pid"
+	truthy "$(uci_get enabled 0)" || return 0
+	wan_select_interface >/dev/null || return 0
+	xray_running && return 0
+	state="$(ubus call service list '{"name":"owrt-remote"}' 2>/dev/null)" || return 1
+	running="$(printf '%s' "$state" | jsonfilter -e '@["owrt-remote"].instances.xray.running' 2>/dev/null)"
+	[ "$running" != true ] || return 0
+	heartbeat="$(printf '%s' "$state" | jsonfilter -e '@["owrt-remote"].instances.heartbeat.running' 2>/dev/null)"
+	# Respect an explicit service stop, including stops made outside the panel.
+	[ "$heartbeat" = true ] || return 0
+	now="$(uptime_seconds)"
+	now="$(safe_num "$now" 0)"
+	[ "$now" -gt 0 ] || now="$(safe_num "$(date +%s 2>/dev/null)" 0)"
+	last="$(safe_num "$(cat "${TMPDIR:-/tmp}/owrt-remote-xray-recovery.last" 2>/dev/null)" 0)"
+	if [ "$last" -gt 0 ] && [ "$now" -ge "$last" ] && [ $((now-last)) -lt 300 ]; then return 0; fi
+	printf '%s\n' "$now" >"${TMPDIR:-/tmp}/owrt-remote-xray-recovery.last"
+	log 'Xray: WAN доступен, туннель остановлен; запрошен повторный запуск отдельного instance'
+	ubus call service add '{"name":"owrt-remote","instances":{"xray":{"command":["/usr/sbin/owrt-remote","run"],"env":{"OWRT_REMOTE_SERVICE_LOG":"1"},"respawn":["3600","5","5"],"stdout":true,"stderr":true}}}' >/dev/null || {
+		log 'ОШИБКА: procd не принял запрос восстановления Xray; Heartbeat продолжает работать'
+		return 1
+	}
+	)
+}
+
+wan_recovery_reap() {
+	local owner reaper rest
+	# The reaper itself must be serialized and recoverable after SIGKILL.
+	if ! mkdir "$1/reap" 2>/dev/null; then
+		reaper="$(cat "$1/reap/pid" 2>/dev/null)"
+		case "$reaper" in
+			''|*[!0-9]*) [ "$2" -ge 15 ] || return 0 ;;
+			*) kill -0 "$reaper" 2>/dev/null && return 0 ;;
+		esac
+		rm -f "$1/reap/pid"; rmdir "$1/reap" 2>/dev/null || return 0
+		return 0
+	fi
+	reaper=$$
+	if [ -r /proc/self/stat ]; then read -r reaper rest </proc/self/stat || reaper=$$; fi
+	printf '%s\n' "$reaper" >"$1/reap/pid"
+	owner="$(cat "$1/pid" 2>/dev/null)"
+	case "$owner" in
+		''|*[!0-9]*) ;;
+		*) if kill -0 "$owner" 2>/dev/null; then rm -f "$1/reap/pid"; rmdir "$1/reap"; return 0; fi ;;
+	esac
+	rm -f "$1/pid" "$1/reap/pid"
+	rmdir "$1/reap" 2>/dev/null && rmdir "$1" 2>/dev/null || true
 }
 
 wan_reconnect_xray() {
@@ -1265,6 +1387,10 @@ heartbeat_self_heal() {
 	printf '%s\n' "$fails" >"$fail_file"
 
 	[ "$fails" -lt "$threshold" ] && return 0
+	if truthy "$(uci_get wan_direct 0)" && ! wan_select_interface >/dev/null; then
+		log 'Heartbeat: перезапуск отложен; ни один выбранный WAN не имеет физического IPv4 default route'
+		return 0
+	fi
 	if active_ssh_session; then
 		log "heartbeat failed ${threshold} times, restart postponed because SSH session is active"
 		return 0
@@ -1535,11 +1661,29 @@ ensure_xray_available_with_retry() {
 	return 1
 }
 
+wait_for_selected_wan() {
+	local waiting
+	waiting=0
+	while truthy "$(uci_get wan_direct 0)"; do
+		truthy "$(uci_get enabled 0)" || return 1
+		if wan_select_interface >/dev/null; then
+			[ "$waiting" = 0 ] || log 'Xray: выбранный WAN снова доступен; продолжается запуск туннеля'
+			return 0
+		fi
+		[ "$waiting" = 1 ] || log 'Xray: ожидание выбранного WAN с физическим IPv4 default route; конфигурация сохранена'
+		waiting=1
+		sleep 5
+	done
+}
+
 run_xray() {
 	local enabled xray_bin xray_config
 	enabled="$(uci_get enabled 0)"
 	truthy "$enabled" || die "service disabled: set option enabled '1'"
 
+	# Missing WAN is a temporary condition, not a failed Xray configuration.
+	# Stay supervised instead of exhausting procd's six startup attempts.
+	wait_for_selected_wan || return 1
 	ensure_xray_available_with_retry || die "cannot prepare Xray for tunnel"
 	xray_bin="$(xray_bin_path)"
 	xray_config="$(render_client_config)" || die "cannot create Xray configuration"

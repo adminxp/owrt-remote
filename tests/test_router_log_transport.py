@@ -23,6 +23,8 @@ class RouterLogTransportTests(unittest.TestCase):
         self.env = {**self.journal.env, 'OWRT_REMOTE_WAN_HELPER': (ROOT / 'files/usr/lib/owrt-remote/wan.sh').as_posix(),
                     'TEST_ROOT': self.journal.root.as_posix(), 'TEST_PYTHON': Path(sys.executable).as_posix()}
         self.mocks = r'''
+# Windows has no RLIMIT_FSIZE; production ash enforces the actual file limit.
+ulimit() { return 0; }
 uci_get() {
     case "$1" in
         enabled) printf '%s' "${TEST_ENABLED:-1}" ;; hub_token) printf test-token ;; router_id) printf main ;;
@@ -60,6 +62,7 @@ jsonfilter() {
 '''
 
     def sync(self, **flags):
+        self.journal.helper_call('flush', '', 'force')
         script = self.source + '\n' + self.mocks + '\nsync_global_logs\n'
         return subprocess.run([SH], input=script, encoding='utf-8', capture_output=True,
                               env={**self.env, **flags}, timeout=25)
@@ -80,14 +83,34 @@ jsonfilter() {
                 self.assertEqual('direct' in requests, direct == '1')
                 self.assertEqual('prepare' in requests, direct == '1')
                 self.assertEqual(json.loads(self.journal.helper_call('export'))['data'], '')
-                self.assertFalse(list(self.journal.log_dir.glob('sync.*')))
+                self.assertFalse(list(self.journal.run_dir.glob('sync.*')))
 
     def test_failed_delivery_preserves_unsent_records_and_removes_payload_files(self):
         before = json.loads(self.journal.helper_call('export'))
         result = self.sync(TEST_HTTP_FAIL='1')
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(json.loads(self.journal.helper_call('export')), before)
-        self.assertFalse(list(self.journal.log_dir.glob('sync.*')))
+        self.assertFalse(list(self.journal.run_dir.glob('sync.*')))
+
+    def test_agent_update_delivers_with_older_helper_without_its_own_runtime_directory(self):
+        # The pre-persistent helper creates only /tmp/owrt-remote-logs. A WAN
+        # agent update must not depend on that helper creating the new runtime.
+        helper = self.journal.root / 'old-helper'
+        record = base64.b64encode(b'[OK] older helper record\n').decode()
+        batch = json.dumps({'journal_id': 'older', 'from': 0, 'to': 25, 'data': record})
+        helper.write_text('#!/bin/sh\ncase "$1" in\ncheck) exit 0 ;;\nexport) printf \'%s\\n\' \'' + batch +
+                          '\' ;;\nack) printf \'%s\\n\' "$2 $3" >"$TEST_ROOT/older-ack" ;;\nesac\n',
+                          encoding='utf-8', newline='\n')
+        runtime = self.journal.root / 'new-runtime'
+        result = subprocess.run([SH], input=self.source + '\n' + self.mocks + '\nsync_global_logs\n',
+                                encoding='utf-8', capture_output=True,
+                                env={**self.env, 'OWRT_REMOTE_LOG_HELPER': helper.as_posix(),
+                                     'OWRT_REMOTE_LOG_RUNTIME': runtime.as_posix()}, timeout=25)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(runtime.is_dir())
+        self.assertTrue((self.journal.root / 'older-ack').is_file())
+        self.assertFalse((runtime / 'sync-lock').exists())
+        self.assertFalse(list(runtime.glob('sync.*')))
 
     def test_disabled_remote_still_delivers_stop_reason_and_state_without_restart(self):
         self.journal.helper_call('append', 'Сервис: остановка туннеля\n')
@@ -97,14 +120,14 @@ jsonfilter() {
                 self.assertEqual(result.returncode, 0, result.stderr)
                 payload = json.loads((self.journal.root / 'delivered.json').read_text())
                 self.assertEqual(payload['state'], {'enabled': False, 'xray': 'stopped'})
-                self.assertFalse(list(self.journal.log_dir.glob('sync.*')))
+                self.assertFalse(list(self.journal.run_dir.glob('sync.*')))
         self.assertEqual(json.loads(self.journal.helper_call('export'))['data'], '')
 
     def test_overlapping_delivery_does_not_start_second_sender(self):
-        lock = self.journal.log_dir / 'sync-lock'
+        lock = self.journal.run_dir / 'sync-lock'
         lock.mkdir()
         # The shell's own PID is alive for the duration of sync_global_logs.
-        script = self.source + '\n' + self.mocks + '\nprintf "%s" "$$" >"$OWRT_REMOTE_LOG_DIR/sync-lock/pid"\nsync_global_logs\n'
+        script = self.source + '\n' + self.mocks + '\nprintf "%s" "$$" >"$OWRT_REMOTE_LOG_RUNTIME/sync-lock/pid"\nsync_global_logs\n'
         result = subprocess.run([SH], input=script, encoding='utf-8', capture_output=True, env=self.env, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.journal.root / 'requests').exists())
@@ -113,15 +136,25 @@ jsonfilter() {
     def test_wan_failure_releases_delivery_lock_for_next_attempt(self):
         result = self.sync(TEST_DIRECT='1', TEST_WAN_FAIL='1', TEST_ENABLED='0')
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertFalse((self.journal.log_dir / 'sync-lock').exists())
+        self.assertFalse((self.journal.run_dir / 'sync-lock').exists())
         self.assertNotEqual(json.loads(self.journal.helper_call('export'))['data'], '')
         self.assertEqual(self.sync(TEST_DIRECT='1', TEST_ENABLED='0').returncode, 0)
 
     def test_abandoned_empty_delivery_lock_is_recovered(self):
-        (self.journal.log_dir / 'sync-lock').mkdir()
+        (self.journal.run_dir / 'sync-lock').mkdir()
         result = self.sync(TEST_ENABLED='0')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.journal.log_dir / 'sync-lock').exists())
+        self.assertFalse((self.journal.run_dir / 'sync-lock').exists())
+        self.assertTrue((self.journal.root / 'delivered.json').exists())
+        self.assertFalse(list(self.journal.run_dir.glob('http/owrt-remote-http.*')))
+
+    def test_abandoned_delivery_lock_reaper_is_cleaned_for_next_attempt(self):
+        lock = self.journal.run_dir / 'sync-lock'
+        lock.mkdir(); (lock / 'pid').write_text('99999999')
+        (lock / 'reap').mkdir(); (lock / 'reap/pid').write_text('99999998')
+        self.assertEqual(self.sync().returncode, 0)
+        self.assertEqual(self.sync().returncode, 0)
+        self.assertFalse(lock.exists())
         self.assertTrue((self.journal.root / 'delivered.json').exists())
 
     def test_panel_stop_sends_completed_result_without_waiting_for_restart(self):

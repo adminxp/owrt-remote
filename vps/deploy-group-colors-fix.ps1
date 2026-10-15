@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$UploadName = 'owrt-version-v116-' + [guid]::NewGuid().ToString('N')
+$UploadName = 'owrt-group-colors-v117-' + [guid]::NewGuid().ToString('N')
 $StageRoot = Join-Path ([System.IO.Path]::GetTempPath()) $UploadName
 $Utf8 = [System.Text.UTF8Encoding]::new($false)
 
@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-v116
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-group-colors-v117
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 
@@ -57,8 +57,11 @@ if [ '__ACTION__' = Install ]; then
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).read_text(encoding='utf-8')
-required = ('v116',)
-if 'v' + '115' in source:
+required = ('v117', '#routerForm select option,#routerGroupFilter option', 'background-color:#221a34', 'id="backupDownload"', 'id="backupRestore"')
+if 'class="backupCmds"' in source:
+    print('Old backup command instructions remain in candidate', file=sys.stderr)
+    raise SystemExit(1)
+if 'v' + '116' in source:
     print('Old UI version remains in candidate', file=sys.stderr)
     raise SystemExit(1)
 missing = [marker for marker in required if marker not in source]
@@ -103,7 +106,7 @@ if [ "$healthy" -ne 1 ]; then
     exit 1
 fi
 cmp "$source_file" "$target"
-printf '\nBackup: %s\nHUB_V116_%s_OK\n' "$backup" '__ACTION__'
+printf '\nBackup: %s\nGROUP_COLORS_V117_%s_OK\n' "$backup" '__ACTION__'
 '@
 
 $RemoteScript = $RemoteScript.Replace('__UPLOAD_NAME__', $UploadName).Replace('__ACTION__', $Action)
@@ -130,7 +133,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Upload failed. VPS was not changed.' }
     & ssh -T -o ConnectTimeout=10 $Vps "sh /tmp/$UploadName/run.sh"
     if ($LASTEXITCODE -ne 0) { throw "$Action failed. See the output above; success was not confirmed." }
-    Write-Host "Hub v116 $Action finished successfully. Refresh the Hub panel."
+    Write-Host "Group colors fix $Action finished successfully. Refresh the Hub panel with Ctrl+F5."
 }
 finally {
     if (-not $PrepareOnly) {

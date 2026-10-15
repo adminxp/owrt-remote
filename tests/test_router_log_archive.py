@@ -113,6 +113,81 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn('новый журнал', self.snapshot()['text'])
         self.assertIn('first', self.snapshot()['text'])
 
+    def test_empty_status_cannot_confirm_missing_records_or_invent_rotation_gap(self):
+        reply = self.ingest(batch(b'', start=298))
+        self.assertEqual(reply['offset'], 0)
+        self.assertEqual(self.snapshot()['text'], '')
+        raw = b'[OK] retained records arrive after status\n'
+        self.ingest(batch(raw))
+        reply = self.ingest(batch(b'', start=1000))
+        self.assertEqual(reply['offset'], len(raw))
+        self.assertEqual(self.snapshot()['text'].encode(), raw)
+
+    def test_actual_gap_with_data_is_reported_once_but_retries_keep_data(self):
+        value = batch(b'[OK] surviving records\n', start=50)
+        self.ingest(value)
+        self.ingest(value)
+        text = self.snapshot()['text']
+        self.assertEqual(text.count('не доставлена'), 1)
+        self.assertEqual(text.count('surviving records'), 1)
+
+    def test_empty_new_generation_cannot_erase_current_journal_cursor(self):
+        raw = b'[OK] previous generation\n'
+        self.ingest(batch(raw))
+        self.ingest(batch(b'', start=2000, journal='new-journal'))
+        self.ingest(batch(raw))
+        self.assertEqual(self.snapshot()['text'].encode(), raw)
+
+    def test_recovery_generation_replays_previously_falsely_confirmed_chunks(self):
+        # Reproduce the cursor left by the former empty-batch ingestion bug.
+        with self.app.conn() as conn:
+            conn.execute("insert into router_logs(router_id,journal_id,cursor) values ('main','broken',298)")
+        self.ingest(batch(b'[OK] retained restart event\n', journal='recovered-old'))
+        self.assertIn('retained restart event', self.snapshot()['text'])
+
+    def test_real_router_spool_recovers_bad_digest_and_delivers_after_restart(self):
+        from test_persistent_logs import PersistentLogsTests
+        client = PersistentLogsTests()
+        client.setUp()
+        self.addCleanup(client.doCleanups)
+        client.append('Панель: действие=stop; начало\nСервис: остановка туннеля\n')
+        client.flush()
+        original = client.export()
+        client.acknowledge(original); client.flush()
+        with self.app.conn() as conn:
+            conn.execute('insert into router_logs(router_id,journal_id,cursor) values (?,?,?)',
+                         ('main', original['journal_id'], original['to']))
+        part = next(client.journal.glob('part.*'))
+        part.rename(part.with_name(part.name.rsplit('.', 1)[0] + '.'))
+        (client.run_dir / 'recovered-v2').unlink()
+        repaired = client.export()
+        reply = self.ingest(repaired, {'enabled': False, 'xray': 'stopped'})
+        client.call('ack', '', reply['journal_id'], str(reply['offset']))
+        # A lost acknowledgment may replay, but the archive must stay unchanged.
+        self.ingest(repaired)
+        self.assertEqual(self.snapshot()['text'].count('Сервис: остановка туннеля'), 1)
+        client.append('Сервис: запуск\n'); client.flush()
+        second = client.export()
+        reply = self.ingest(second, {'enabled': True, 'xray': 'running'})
+        client.call('ack', '', reply['journal_id'], str(reply['offset']))
+        text = self.snapshot()['text']
+        self.assertIn('Сервис: запуск', text)
+        self.assertNotIn('не доставлена до ротации', text)
+        self.assertEqual(client.export()['data'], '')
+
+    def test_disk_mount_diagnostic_resolves_deepest_mount_and_escaped_paths(self):
+        path = self.app.db_path.resolve()
+        mount = str(path.parent).replace(' ', r'\040')
+        root = str(Path(path.anchor)).replace(' ', r'\040')
+        mountinfo = f'1 0 8:1 / {root} rw - ext4 /dev/vda1 rw\n'
+        mountinfo += f'2 1 0:1 / {mount} rw - tmpfs tmpfs rw\n'
+        with mock.patch.object(hub.sys, 'platform', 'linux'), mock.patch('builtins.open', mock.mock_open(read_data=mountinfo)):
+            result = hub.router_log_storage(path)
+        self.assertIs(result['persistent'], False)
+        self.assertEqual(result['filesystem'], 'tmpfs')
+        with mock.patch.object(hub.sys, 'platform', 'linux'), mock.patch('builtins.open', mock.mock_open(read_data=mountinfo.splitlines()[0])):
+            self.assertIs(hub.router_log_storage(path)['persistent'], True)
+
     def test_offline_clear_does_not_restore_old_logs_on_reconnection(self):
         old = b'[ERROR] old\n'
         self.ingest(batch(old))

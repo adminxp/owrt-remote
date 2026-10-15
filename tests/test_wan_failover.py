@@ -129,7 +129,7 @@ class WanFailoverTests(unittest.TestCase):
         self.prepare()
         config = self.directory / "xray.json"
         config.write_text(json.dumps({"outbounds": [{"tag": "vps-interconn", "streamSettings": {"sockopt": {"interface": "eth0"}}}]}))
-        self.config(wan_interface="wan wwan", wan_direct="1", vps_host="192.0.2.10", xray_config=config.as_posix())
+        self.config(enabled="1", wan_interface="wan wwan", wan_direct="1", vps_host="192.0.2.10", xray_config=config.as_posix())
         result = self.shell('''
 xray_running() { return 0; }
 wan_reconnect_xray() { printf '%s -> %s\n' "$1" "$2" >>"$TEST_ROOT/reconnect"; }
