@@ -23,6 +23,7 @@ usage() {
   owrt-remote status
   owrt-remote doctor
   owrt-remote install-xray-tmp
+  owrt-remote prepare-xray
   owrt-remote stop-xray
   owrt-remote render-client [--stdout]
   owrt-remote run
@@ -1482,24 +1483,239 @@ doctor() {
 	fi
 }
 
-# Override Xray bootstrap with boot-safe retry logic.
-fetch_file() {
-	local url dst
-	url="$1"
-	dst="$2"
-	rm -f "$dst"
-	if command -v curl >/dev/null 2>&1 && curl -fsSL "$url" -o "$dst"; then
-		return 0
-	fi
-	if command -v uclient-fetch >/dev/null 2>&1 && uclient-fetch -q -O "$dst" "$url"; then
-		return 0
-	fi
-	if command -v wget >/dev/null 2>&1 && wget -q -O "$dst" "$url"; then
-		return 0
-	fi
-	rm -f "$dst"
-	return 1
+# Keep the executable in RAM, but retain one compressed, verified boot copy.
+# Cache writes happen only when the executable changes, never per Heartbeat.
+xray_runtime_dir() { printf '%s' "${OWRT_REMOTE_XRAY_RUNTIME:-/tmp/owrt-xray}"; }
+xray_process_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+xray_process_identity() {
+	local rest
+	read -r XRAY_SELF_PID rest </proc/self/stat || return 1
+	XRAY_SELF_BIRTH="$(xray_process_start "$XRAY_SELF_PID")"
+	[ -n "$XRAY_SELF_BIRTH" ]
 }
+xray_bootstrap_lock() {
+	local owner attempt current saved
+	XRAY_LOCK="$(xray_runtime_dir)/bootstrap-lock"
+	mkdir -p "$(xray_runtime_dir)" || return 1
+	xray_process_identity || return 1
+	attempt=0
+	while ! mkdir "$XRAY_LOCK" 2>/dev/null; do
+		[ -d "$XRAY_LOCK" ] || return 1
+		owner=''; current=''
+		read -r owner current <"$XRAY_LOCK/owner" 2>/dev/null || true
+		saved="$owner $current"
+		case "$owner:$current" in
+			*[!0-9:]*|:*|*:) current=''; [ "$attempt" -lt 5 ] || current=stale ;;
+			*) [ "$(xray_process_start "$owner")" = "$current" ] || current=stale ;;
+		esac
+		if [ "$current" = stale ]; then xray_bootstrap_reap "$saved" "$attempt"; fi
+		attempt=$((attempt+1)); [ "$attempt" -lt 150 ] || { log 'Xray: загрузчик уже работает; повтор будет выполнен позже'; return 1; }
+		sleep 1
+	done
+	printf '%s %s\n' "$XRAY_SELF_PID" "$XRAY_SELF_BIRTH" >"$XRAY_LOCK/owner" || { rmdir "$XRAY_LOCK" 2>/dev/null || true; return 1; }
+}
+xray_bootstrap_reap() {
+	local owner current saved
+	saved="$1"
+	if mkdir "$XRAY_LOCK/reap" 2>/dev/null; then
+		printf '%s %s\n' "$XRAY_SELF_PID" "$XRAY_SELF_BIRTH" >"$XRAY_LOCK/reap/owner"
+		# Re-read after claiming reaping: another waiter may have acquired
+		# a new lock since our first observation of the dead process.
+		owner=''; current=''; read -r owner current <"$XRAY_LOCK/owner" 2>/dev/null || true
+		if [ "$saved" = "$owner $current" ]; then rm -f "$XRAY_LOCK/owner"; fi
+		rm -f "$XRAY_LOCK/reap/owner"; rmdir "$XRAY_LOCK/reap"; rmdir "$XRAY_LOCK" 2>/dev/null || true
+		return 0
+	fi
+	# A SIGKILL during reaping must not leave a permanent bootstrap lock.
+	owner=''; current=''; read -r owner current <"$XRAY_LOCK/reap/owner" 2>/dev/null || true
+	case "$owner:$current" in
+		*[!0-9:]*|:*|*:) [ "$2" -ge 10 ] || return 0 ;;
+		*) [ "$(xray_process_start "$owner")" != "$current" ] || return 0 ;;
+	esac
+	rm -f "$XRAY_LOCK/reap/owner"; rmdir "$XRAY_LOCK/reap" 2>/dev/null || true
+}
+xray_bootstrap_unlock() { rm -f "$XRAY_LOCK/owner"; rmdir "$XRAY_LOCK" 2>/dev/null || true; }
+xray_cache_mount() {
+	local path
+	path="$1"
+	while [ ! -e "$path" ]; do path="$(dirname "$path")"; done
+	path="$(readlink -f "$path")" || return 1
+	awk -v path="$path" '
+		(path == $2 || index(path, $2 "/") == 1 || $2 == "/") && length($2) > best {
+			best=length($2); mount=$2; fs=$3; flags=$4
+		}
+		END { if (best) print mount, fs, flags; else exit 1 }
+	' /proc/mounts
+}
+xray_cache_dir() {
+	local mount fs flags candidate
+	read -r mount fs flags <<EOF
+$(xray_cache_mount /overlay)
+EOF
+	if [ "$mount" = /overlay ]; then
+		candidate=/overlay/owrt-remote/xray-cache
+	else
+		read -r mount fs flags <<EOF
+$(xray_cache_mount /)
+EOF
+		candidate=/etc/owrt-remote/xray-cache
+	fi
+	case "$fs" in ubifs|jffs2|ext4|ext3|ext2|f2fs|btrfs) ;; *) return 1 ;; esac
+	case ",$flags," in *,rw,*) ;; *) return 1 ;; esac
+	# Existing symlinks or a nested tmpfs must not redirect this cache into RAM.
+	read -r mount fs flags <<EOF
+$(xray_cache_mount "$candidate")
+EOF
+	case "$fs" in ubifs|jffs2|ext4|ext3|ext2|f2fs|btrfs) ;; *) return 1 ;; esac
+	case ",$flags," in *,rw,*) ;; *) return 1 ;; esac
+	printf '%s' "$candidate"
+}
+xray_digest() {
+	local digest
+	digest="$(sha256sum "$1" 2>/dev/null)" || return 1
+	digest="${digest%% *}"
+	case "$digest" in ''|*[!0-9a-f]*) return 1 ;; esac
+	[ "${#digest}" = 64 ] || return 1
+	printf '%s' "$digest"
+}
+xray_cache_save() (
+	# A subshell already isolates these variables (BusyBox ash rejects local here).
+	bin="$1"
+	[ -s "$bin" ] && [ -x "$bin" ] || return 1
+	"$bin" version >/dev/null 2>&1 || return 1
+	store="$(xray_cache_dir)" || { log 'Xray: постоянный кэш недоступен; после перезагрузки потребуется загрузка из сети'; return 1; }
+	asset="$(xray_release_asset)" || return 1
+	digest="$(xray_digest "$bin")" || return 1
+	target="$store/$asset.$digest.gz"
+	# An existing valid copy requires no Flash writes, including after reboot.
+	if [ -s "$target" ] && gzip -t "$target" 2>/dev/null; then return 0; fi
+	umask 077
+	mkdir -p "$store" || return 1
+	chmod 700 "$store" || return 1
+	# Writers hold bootstrap-lock; only incomplete staging files are disposable.
+	rm -f "$store"/.new.*
+	free="$(df -Pk "$store" | awk 'NR==2 { print $4 }')"
+	case "$free" in ''|*[!0-9]*) return 1 ;; esac
+	# Size is measured by streaming compression, without a second RAM copy.
+	size="$(gzip -c "$bin" | wc -c)"
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	if [ "$size" -le 0 ] || [ "$size" -gt 16777216 ] || [ "$free" -lt "$(( (size+1023)/1024 + 2048 ))" ]; then
+		log 'Xray: недостаточно места для постоянного кэша с резервом 2 МиБ; рабочий Xray сохранён'
+		return 1
+	fi
+	temp="$(mktemp "$store/.new.XXXXXX")" || return 1
+	trap 'rm -f "$temp"' EXIT
+	trap 'exit 1' INT TERM
+	gzip -c "$bin" >"$temp" && gzip -t "$temp" || return 1
+	[ "$(wc -c <"$temp")" -le 16777216 ] || return 1
+	mv -f "$temp" "$target" || return 1
+	# Once per binary update: commit the replacement before deleting the last
+	# bootable copy. No Flash sync is performed by Heartbeat or normal startup.
+	sync || return 1
+	# Only after publishing the replacement may the previous copy be removed.
+	for old in "$store"/Xray-*.zip.*.gz; do [ "$old" = "$target" ] || rm -f "$old"; done
+	log "Xray: сжатая загрузочная копия сохранена на постоянном разделе; bytes=$(wc -c <"$target")"
+)
+xray_cache_restore() (
+	store="$(xray_cache_dir)" || return 1
+	asset="$(xray_release_asset)" || return 1
+	dir="$(xray_runtime_dir)"; mkdir -p "$dir" || return 1
+	temp="$(mktemp "$dir/.restore.XXXXXX")" || return 1
+	trap 'rm -f "$temp"' EXIT
+	trap 'exit 1' INT TERM
+	for cache in "$store/$asset."*.gz; do
+		[ -s "$cache" ] || continue
+		[ "$(wc -c <"$cache")" -le 16777216 ] || continue
+		digest="${cache#"$store/$asset."}"; digest="${digest%.gz}"
+		case "$digest" in ''|*[!0-9a-f]*) continue ;; esac
+		[ "${#digest}" = 64 ] || continue
+		# Bound even an invalid compressed file; verify bytes before execution.
+		gzip -t "$cache" 2>/dev/null || { log 'Xray: повреждён постоянный кэш; требуется повторная загрузка'; continue; }
+		gzip -dc "$cache" | head -c 67108865 >"$temp"
+		size="$(wc -c <"$temp")"
+		[ "$size" -le 67108864 ] && [ "$(xray_digest "$temp")" = "$digest" ] || continue
+		chmod 755 "$temp" && "$temp" version >/dev/null 2>&1 || continue
+		mv -f "$temp" "$dir/xray" || return 1
+		if [ "$(uci_get xray_bin '')" != "$dir/xray" ]; then
+			uci set "$CONFIG.$SECTION.xray_bin=$dir/xray" && uci commit "$CONFIG" || return 1
+		fi
+		log 'Xray: восстановлен из постоянного кэша без загрузки из интернета'
+		return 0
+	done
+	return 1
+)
+
+# Keep a finite wait even without BusyBox's optional timeout applet. The
+# foreground poll avoids a racing/orphaned watchdog when downloads finish fast.
+xray_native_fetch() (
+	dst="$1"; shift
+	client=''
+	trap 'result=$?; [ -z "$client" ] || { kill -KILL "$client" 2>/dev/null || true; wait "$client" 2>/dev/null || true; }; [ "$result" = 0 ] || rm -f "$dst"' EXIT
+	trap 'exit 1' INT TERM
+	# Shells report file blocks in 512 or 1024 bytes: either limit stays <=32 MiB.
+	ulimit -f 32768 || return 1
+	"$@" & client=$!
+	ticks=0
+	while kill -0 "$client" 2>/dev/null; do
+		if [ "$ticks" -ge 120 ]; then
+			kill -KILL "$client" 2>/dev/null || true
+			wait "$client" 2>/dev/null || true
+			client=''; return 28
+		fi
+		sleep 1; ticks=$((ticks+1))
+	done
+	rc=0; wait "$client" || rc=$?; client=''
+	return "$rc"
+)
+
+# Bound one complete download, including redirects. In WAN mode use the
+# selected resolver on every HTTPS hop, retaining hostname verification/SNI.
+fetch_file() (
+	url="$1"; dst="$2"; rm -f "$dst"
+	stats=''
+	trap 'result=$?; rm -f "$stats"; [ "$result" = 0 ] || rm -f "$dst"' EXIT
+	trap 'exit 1' INT TERM
+	unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+	if command -v curl >/dev/null 2>&1; then
+		stats="$(mktemp "${TMPDIR:-/tmp}/owrt-xray-http.XXXXXX")" || return 1
+		started="$(remote_clock_ms)"; hop=0; rc=1
+		while [ "$hop" -le 5 ]; do
+			origin="$(remote_url_origin "$url")" || return 3
+			case "$origin" in https://*) ;; *) log 'Xray: отклонена загрузка без HTTPS'; return 3 ;; esac
+			set -- -q -fsS --connect-timeout 10 --noproxy '*' --proto '=https' --max-filesize 33554432
+			if truthy "$(uci_get wan_direct 0)"; then
+				host="${origin#https://}"; port="${host##*:}"; host="${host%:*}"
+				device="$(wan_device)" || return 1
+				ip="$(wan_resolve_host "$host")" || return 6
+				set -- "$@" --interface "$device" --resolve "$host:$port:$ip"
+			fi
+			remaining=$((120000 - $(remote_clock_ms) + started))
+			[ "$remaining" -gt 0 ] || return 28
+			remaining="$(LC_ALL=C awk -v ms="$remaining" 'BEGIN { printf "%.3f", ms/1000 }')"
+			rc=0
+			curl "$@" --max-time "$remaining" -o "$dst" -w '%{http_code} %{redirect_url}\n' "$url" >"$stats" || rc=$?
+			[ "$rc" = 0 ] || return "$rc"
+			code=''; redirect=''; read -r code redirect <"$stats" || true
+			case "$code" in
+				301|302|303|307|308) rc=47; [ -n "$redirect" ] || return 47; url="$redirect"; hop=$((hop+1)) ;;
+				200) [ -s "$dst" ] || { rc=1; return 1; }; return 0 ;;
+				*) rc=22; return 22 ;;
+			esac
+		done
+		return 47
+	fi
+	# Minimal images without curl keep bounded native HTTPS clients. These do
+	# not offer curl's per-host resolver override.
+	if truthy "$(uci_get wan_direct 0)"; then log 'Xray: curl отсутствует; загрузчик использует системный DNS'; fi
+	rc=1
+	case "$url" in https://*) ;; *) return 3 ;; esac
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		xray_native_fetch "$dst" uclient-fetch -q -T 15 -O "$dst" "$url" && rc=0
+	elif command -v wget >/dev/null 2>&1; then
+		xray_native_fetch "$dst" wget -q -T 15 -O "$dst" "$url" && rc=0
+	fi
+	[ "$rc" = 0 ] && [ -s "$dst" ] && [ "$(wc -c <"$dst")" -le 33554432 ]
+)
 
 install_package() {
 	local pkg
@@ -1550,9 +1766,14 @@ ensure_fetch_tool() {
 	return 1
 }
 
-install_xray_tmp() {
-	local dir zip asset url version entry candidates
-	dir="/tmp/owrt-xray"
+install_xray_tmp() (
+	xray_bootstrap_lock || return 1
+	trap 'xray_bootstrap_unlock' EXIT
+	trap 'exit 1' INT TERM
+	install_xray_tmp_locked
+)
+install_xray_tmp_locked() (
+	dir="$(xray_runtime_dir)"
 	zip="$dir/xray.zip"
 	asset="$(xray_release_asset)" || {
 		log "unknown Xray asset for $(uname -m 2>/dev/null)"
@@ -1560,7 +1781,12 @@ install_xray_tmp() {
 	}
 	url="$XRAY_RELEASE_BASE_URL/$asset"
 
-	mkdir -p /var/lock /var/run "$dir"
+	mkdir -p "$dir" || return 1
+	# An interrupted previous download is disposable; the working binary and
+	# compressed boot copy are never removed before a candidate is validated.
+	rm -f "$dir/xray.zip.new" "$dir/xray.new"
+	trap 'rm -f "$dir/xray.zip.new" "$dir/xray.new"' EXIT
+	trap 'exit 1' INT TERM
 	if ! command -v unzip >/dev/null 2>&1; then
 		install_package unzip || {
 			log "cannot install unzip"
@@ -1573,17 +1799,17 @@ install_xray_tmp() {
 		return 1
 	}
 
-	printf 'Skachivayu Xray: %s\n' "$asset"
-	rm -f "$zip" "$dir/xray" "$dir/xray_softfloat"
-	fetch_file "$url" "$zip" || {
-		log "cannot download Xray: $url"
+	log "Xray: загрузка $asset; общий тайм-аут=120s"
+	fetch_file "$url" "$zip.new" || {
+		log "Xray: не удалось загрузить $asset; рабочий бинарник и кэш сохранены"
 		return 1
 	}
-	[ -s "$zip" ] || {
+	[ -s "$zip.new" ] || {
 		log "downloaded Xray archive is empty: $zip"
-		rm -f "$zip"
 		return 1
 	}
+	mv -f "$zip.new" "$zip" || return 1
+	unzip -t "$zip" >/dev/null 2>&1 || { log 'Xray: архив не прошёл проверку целостности; рабочий бинарник сохранён'; return 1; }
 
 	candidates="xray"
 	case "$(xray_arch)" in
@@ -1593,17 +1819,19 @@ install_xray_tmp() {
 	esac
 
 	for entry in $candidates; do
-		( cd "$dir" && unzip -o "$zip" "$entry" >/dev/null ) || continue
-		[ -s "$dir/$entry" ] || continue
-		chmod +x "$dir/$entry"
-		version="$("$dir/$entry" version 2>&1)" || {
-			rm -f "$dir/$entry"
+		# Extract only the named executable, never arbitrary paths from the ZIP.
+		unzip -p "$zip" "$entry" 2>/dev/null | head -c 67108865 >"$dir/xray.new"
+		[ -s "$dir/xray.new" ] || continue
+		[ "$(wc -c <"$dir/xray.new")" -le 67108864 ] || continue
+		chmod 755 "$dir/xray.new"
+		version="$("$dir/xray.new" version 2>&1)" || {
+			rm -f "$dir/xray.new"
 			continue
 		}
 		version="$(printf '%s\n' "$version" | sed -n '1p')"
-
-		uci set "$CONFIG.$SECTION.xray_bin=$dir/$entry"
-		uci commit "$CONFIG"
+		mv -f "$dir/xray.new" "$dir/$entry" || return 1
+		uci set "$CONFIG.$SECTION.xray_bin=$dir/$entry" && uci commit "$CONFIG" || return 1
+		xray_cache_save "$dir/$entry" || true
 		printf 'OK: Xray installed in %s\n' "$dir/$entry"
 		printf 'OK: %s\n' "$version"
 		printf 'OK: xray_bin saved in /etc/config/owrtremote\n'
@@ -1611,14 +1839,15 @@ install_xray_tmp() {
 	done
 
 	log "downloaded Xray does not start"
-	rm -f "$dir/xray" "$dir/xray_softfloat"
 	return 1
-}
+)
 
 ensure_xray_available() {
 	local configured candidate found
 	configured="$(uci_get xray_bin /usr/bin/xray)"
-	[ -x "$configured" ] && return 0
+	if [ -x "$configured" ]; then
+		return 0
+	fi
 
 	for candidate in /usr/bin/xray /usr/bin/xray-core /usr/local/bin/xray /opt/bin/xray /tmp/owrt-xray/xray /tmp/owrt-xray/xray_softfloat /tmp/xray /tmp/xray_softfloat; do
 		if [ -x "$candidate" ]; then
@@ -1640,20 +1869,50 @@ ensure_xray_available() {
 		return 0
 	fi
 
-	log "Xray missing ($configured), reinstalling temporary Xray in /tmp..."
-	install_xray_tmp
+	prepare_xray_tmp
 }
+prepare_xray_tmp() (
+	xray_bootstrap_lock || return 1
+	trap 'xray_bootstrap_unlock' EXIT
+	trap 'exit 1' INT TERM
+	# Recheck after acquiring the lock: a concurrent installer may have finished.
+	configured="$(uci_get xray_bin /usr/bin/xray)"
+	[ ! -x "$configured" ] || return 0
+	xray_cache_restore && return 0
+	log 'Xray: загрузочной копии нет; требуется загрузка из сети'
+	install_xray_tmp_locked
+)
+prepare_xray() (
+	ensure_xray_available || return 1
+	bin="$(xray_bin_path)"
+	case "$bin" in
+		/tmp/*|"$(xray_runtime_dir)"/*)
+			xray_bootstrap_lock || return 1
+			trap 'xray_bootstrap_unlock' EXIT
+			trap 'exit 1' INT TERM
+			xray_cache_save "$bin" || log 'Xray: запускается из RAM; автономное восстановление после перезагрузки пока недоступно'
+			;;
+	esac
+)
 
 ensure_xray_available_with_retry() {
-	local attempts delay try_num
+	local attempts delay try_num managed
 	attempts="${1:-18}"
 	delay="${2:-10}"
 	try_num=1
-	while [ "$try_num" -le "$attempts" ]; do
+	managed="${OWRT_REMOTE_SERVICE_LOG:-0}"
+	while [ "$try_num" -le "$attempts" ] || [ "$managed" = 1 ]; do
+		if [ "$managed" = 1 ]; then
+			truthy "$(uci_get enabled 0)" || return 1
+			wait_for_selected_wan || return 1
+		fi
 		if ensure_xray_available; then
 			return 0
 		fi
-		[ "$try_num" -ge "$attempts" ] && break
+		if [ "$try_num" -ge "$attempts" ]; then
+			[ "$managed" = 1 ] || break
+			delay=60
+		fi
 		log "Xray is not ready yet, retry in ${delay}s (${try_num}/${attempts})"
 		sleep "$delay"
 		try_num=$((try_num + 1))
@@ -1725,6 +1984,9 @@ case "$cmd" in
 		;;
 	install-xray-tmp)
 		install_xray_tmp
+		;;
+	prepare-xray)
+		prepare_xray
 		;;
 	stop-xray)
 		stop_xray

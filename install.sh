@@ -210,8 +210,8 @@ install_xray_runtime() {
 	[ "${ROOT%/}" = "" ] || return 0
 	remote_bin="$(target_path usr/sbin/owrt-remote)"
 	[ -x "$remote_bin" ] || die "missing $remote_bin after install"
-	info "Installing Xray to /tmp..."
-	"$remote_bin" install-xray-tmp || die "failed to install Xray to /tmp"
+	info "Preparing Xray and its persistent boot cache..."
+	"$remote_bin" prepare-xray || die "failed to prepare Xray"
 }
 
 # Stop the old log writer before replacing its storage code. Its bounded legacy
