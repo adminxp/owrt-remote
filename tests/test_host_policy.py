@@ -310,12 +310,12 @@ printf '%s|%s|%s' "$(uci_get hub_url '')" "$(uci_get public_url '')" "$(uci_get 
         self.assertEqual(log.count("reason=https-downgrade"), 2, "repeated proposals must not flood the log")
 
     def test_successful_fallback_heartbeat_does_not_replace_configured_hub_url(self):
-        self.config(hub_url="https://hub.example", hub_token="test-token", vps_host="193.233.82.38")
+        self.config(hub_url="https://hub.example", public_url="https://backup.example", hub_token="test-token", vps_host="193.233.82.38")
         result = self.run_shell('''
 heartbeat_json() { printf '{"id":"test-router"}'; }
 post_json() {
     case "$1" in
-        http://193.233.82.38:8088/api/heartbeat) printf '{"ok":true}' ;;
+        https://backup.example/api/heartbeat) printf '{"ok":true}' ;;
         *) return 1 ;;
     esac
 }
@@ -428,11 +428,11 @@ printf '%s' "$(uci_get hub_url '')"
         self.assertIn("<pppoe-wan>", args)
         self.assertIn("<https://hub.example/api/heartbeat>", args)
         self.assertNotIn("<-k>", args)
-        self.assertIn("<--max-time>\n<10>", args)
-        self.assertIn("<--location>", args)
-        self.assertIn("<--post301>", args)
-        self.assertIn("<--post302>", args)
-        self.assertIn("<--post303>", args)
+        self.assertIn("<--max-time>", args)
+        self.assertIn("<--resolve>", args)
+        self.assertIn("<--data-binary>", args)
+        self.assertNotIn("<--location-trusted>", args)
+        self.assertNotIn("<--location>", args)
 
     def test_busybox_empty_table_is_confirmed_before_wan_start(self):
         self.config(vps_host="193.233.82.38", hub_url="https://hub.example", wan_direct="1", vless_uuid="11111111-1111-4111-8111-111111111111")
@@ -487,7 +487,7 @@ wan_prepare
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.directory.joinpath("xray-called").read_text().strip(), 'run -config ' + config.as_posix())
 
-    def test_plain_http_heartbeat_accepts_json_after_redirect_follow(self):
+    def test_plain_http_heartbeat_uses_controlled_authenticated_posts(self):
         self.config(vps_host="193.233.82.38", vps_host_mode="manual")
         result = self.run_shell('''
 curl() {
@@ -498,8 +498,9 @@ post_json http://hub.example/api/heartbeat test-token "$TEST_ROOT/payload"
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         args = (self.directory / "curl").read_text()
-        self.assertIn("<--location>", args)
-        self.assertIn("<--post301>", args)
+        self.assertIn("<Authorization: Bearer test-token>", args)
+        self.assertIn("<--data-binary>", args)
+        self.assertNotIn("<--location>", args)
 
     def test_literal_ip_fallback_is_not_rewritten_to_a_different_pin(self):
         self.config(vps_host="193.233.82.38", vps_host_mode="manual")

@@ -28,6 +28,7 @@ usage() {
   owrt-remote run
   owrt-remote heartbeat
   owrt-remote heartbeat-loop
+  owrt-remote heartbeat-diagnostics
   owrt-remote logs-sync
   owrt-remote network-diagnostics
 
@@ -813,6 +814,108 @@ heartbeat_json() {
 EOF
 }
 
+remote_clock_ms() {
+	LC_ALL=C awk '{ printf "%.0f", $1 * 1000; exit }' /proc/uptime 2>/dev/null || date +%s000
+}
+
+remote_url_origin() {
+	# Return only a validated origin, never userinfo, path, query or fragment.
+	printf '%s\n' "$1" | LC_ALL=C awk '
+		NR != 1 { bad=1 }
+		NR == 1 {
+			if ($0 ~ /[\001-\040\177]/ || $0 !~ /^https?:\/\//) { bad=1; next }
+			scheme=$0; sub(/:.*/, "", scheme)
+			authority=$0; sub(/^https?:\/\//, "", authority); sub(/[\/?#].*/, "", authority)
+			if (authority ~ /@/) { bad=1; next }
+			port=(scheme == "https" ? 443 : 80)
+			if (authority ~ /^\[[0-9a-fA-F:]+\](:[0-9]+)?$/) {
+				host=authority; sub(/\].*/, "]", host)
+				if (authority ~ /\]:/) { port=authority; sub(/^.*\]:/, "", port) }
+			} else if (authority ~ /^[a-zA-Z0-9_.-]+(:[0-9]+)?$/) {
+				host=authority; sub(/:.*/, "", host)
+				if (authority ~ /:/) { port=authority; sub(/^.*:/, "", port) }
+			} else { bad=1; next }
+			if (port + 0 < 1 || port + 0 > 65535) { bad=1; next }
+		}
+		END { if (bad || !host) exit 1; printf "%s://%s:%d", scheme, tolower(host), port + 0 }
+	'
+}
+
+remote_curl_metrics() {
+	[ -n "${OWRT_REMOTE_HTTP_METRICS:-}" ] || return 0
+	# Parse numeric fields only. redirect_url may contain secrets and is excluded.
+	LC_ALL=C awk -v secure="$2" -v resolver="$3" -v hop="$4" -v wan_dns="${5:-}" -v source="${6:-curl}" '
+		NF >= 6 && $1 ~ /^[0-9][0-9][0-9]$/ {
+			for (i=2; i<=6; i++) if ($i !~ /^[0-9]+(\.[0-9]+)?$/) exit
+			dns=sprintf("%.1f", $2*1000); tcp=($3>0 ? sprintf("%.1f", ($3>$2 ? ($3-$2)*1000 : 0)) : "incomplete")
+			if (source != "curl") dns=(wan_dns ~ /^[0-9]+$/ ? sprintf("%.1f", wan_dns+0) : "n/a")
+			if (source !~ /^(curl|lookup|cache|literal|pinned|pre_resolved)$/) source="pre_resolved"
+			tls=(secure == "https" ? ($4>0 ? sprintf("%.1f", ($4>$3 ? ($4-$3)*1000 : 0)) : "incomplete") : "n/a")
+			printf "tool=curl HTTP=%s DNS_ms=%s TCP_ms=%s TLS_ms=%s TTFB_ms=%.1f total_ms=%.1f WAN_resolve_ms=%d hop=%d DNS_source=%s\n", $1, dns, tcp, tls, $5*1000, $6*1000, resolver, hop, source
+			exit
+		}' "$1" >>"$OWRT_REMOTE_HTTP_METRICS"
+}
+
+remote_curl_post() (
+	local url token file mode dir rc hop origin next_origin redirect code dns tcp tls first total target device resolve started remaining resolver_started resolver_ms dns_ms dns_source OWRT_REMOTE_DNS_STATS_FILE
+	url="$1"; token="$2"; file="$3"; mode="${4:-normal}"
+	origin="$(remote_url_origin "$url")" || return 3
+	dir="$(mktemp -d "${TMPDIR:-/tmp}/owrt-remote-http.XXXXXX")" || return 1
+	chmod 700 "$dir"
+	trap 'rm -f "$dir/body" "$dir/stats" "$dir/error" "$dir/dns"; rmdir "$dir" 2>/dev/null || true' EXIT
+	trap 'exit 1' INT TERM
+	started="$(remote_clock_ms)"; hop=0
+	while :; do
+		resolver_ms=0; dns_ms=''; dns_source=curl
+		set -- -q -fsS --connect-timeout 4 --noproxy '*' --proto '=http,https'
+		if [ "$mode" = wan ]; then
+			OWRT_REMOTE_DNS_STATS_FILE="$dir/dns"; : >"$dir/dns"
+			dns_source=pre_resolved
+			resolver_started="$(remote_clock_ms)"
+			target="$(wan_http_target "$url")" || return 1
+			resolver_ms=$(( $(remote_clock_ms) - resolver_started ))
+			read -r dns_ms dns_source <"$dir/dns" || true
+			device="${target%%|*}"; resolve="${target#*|}"
+			set -- "$@" --interface "$device" --resolve "$resolve"
+		fi
+		remaining=$((10000 - $(remote_clock_ms) + started))
+		[ "$remaining" -gt 0 ] || return 28
+		remaining="$(LC_ALL=C awk -v value="$remaining" 'BEGIN { printf "%.3f", value/1000 }')"
+		rc=0
+		# Each permitted redirect is a separate authenticated POST. curl -L
+		# drops Bearer auth on an origin change, including HTTP -> HTTPS.
+		curl "$@" --max-time "$remaining" -o "$dir/body" \
+			-w '%{http_code} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{redirect_url}\n' \
+			-H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+			--data-binary "@$file" "$url" >"$dir/stats" 2>"$dir/error" || rc=$?
+		remote_curl_metrics "$dir/stats" "${url%%:*}" "$resolver_ms" "$hop" "$dns_ms" "$dns_source"
+		if [ "$rc" != 0 ]; then cat "$dir/error" >&2; return "$rc"; fi
+		code=''; redirect=''
+		read -r code dns tcp tls first total redirect <"$dir/stats" || true
+		redirect="${redirect%"$(printf '\r')"}"
+		case "$code" in
+			301|302|303|307|308)
+				[ -n "$redirect" ] && [ "$hop" -lt 3 ] || return 47
+				next_origin="$(remote_url_origin "$redirect")" || return 47
+				# Send credentials only within the same origin or to HTTPS on
+				# the very same host. Never trust arbitrary redirect destinations.
+				if [ "$origin" != "$next_origin" ]; then
+					case "$origin|$next_origin" in
+						http://*'|'https://*)
+							# Compare hosts independently of the two ports.
+							target="${next_origin%:*}"
+							[ "${origin%:*}" = "http://${target#https://}" ] || return 47
+							;;
+						*) return 47 ;;
+					esac
+				fi
+				url="$redirect"; origin="$next_origin"; hop=$((hop+1))
+				;;
+			*) [ ! -f "$dir/body" ] || cat "$dir/body"; return 0 ;;
+		esac
+	done
+)
+
 post_json() (
 	local url token file
 	url="$1"
@@ -827,13 +930,10 @@ post_json() (
 	fi
 
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --location --max-redirs 3 --post301 --post302 --post303 \
-			--connect-timeout 4 --max-time 10 --noproxy '*' \
-			-H "Authorization: Bearer $token" \
-			-H "Content-Type: application/json" \
-			--data-binary "@$file" "$url"
+		remote_curl_post "$url" "$token" "$file"
 		return
 	fi
+	[ -z "${OWRT_REMOTE_HTTP_METRICS:-}" ] || printf 'tool=uclient/wget DNS_ms=n/a TCP_ms=n/a TLS_ms=n/a\n' >>"$OWRT_REMOTE_HTTP_METRICS"
 	if command -v wget >/dev/null 2>&1; then
 		wget -q -T 10 -O - \
 			--header="Authorization: Bearer $token" \
@@ -918,6 +1018,7 @@ heartbeat_emit_endpoint() {
 	local base marker
 	base="$(normalize_url_base "$1")"
 	[ -n "$base" ] || return 0
+	case "${HEARTBEAT_REQUIRE_HTTPS:-0}|$base" in 1'|'http://*) return 0 ;; esac
 	marker="|$base|"
 	case "${HEARTBEAT_ENDPOINT_SEEN:-}" in
 		*"$marker"*) return 0 ;;
@@ -927,11 +1028,13 @@ heartbeat_emit_endpoint() {
 }
 
 heartbeat_candidate_endpoints() {
-	local hub_url public_url vps_host
+	local hub_url public_url vps_host HEARTBEAT_REQUIRE_HTTPS
 	HEARTBEAT_ENDPOINT_SEEN='|'
 	hub_url="$(uci_get hub_url '')"
 	public_url="$(uci_get public_url '')"
 	vps_host="$(uci_get vps_host '')"
+	HEARTBEAT_REQUIRE_HTTPS=0
+	case "$hub_url" in https://*) HEARTBEAT_REQUIRE_HTTPS=1 ;; esac
 	heartbeat_emit_endpoint "$hub_url"
 	heartbeat_emit_endpoint "$public_url"
 	case "$vps_host" in
@@ -1010,8 +1113,31 @@ heartbeat_apply_hub_update() {
 	fi
 }
 
-send_heartbeat() {
-	local hub_url token endpoint tmp response event used fallback_base errors rc
+heartbeat_failure_reason() {
+	case "$1|$2" in
+		*'|'401|*'|'403) printf auth_rejected ;;
+		28'|'*) printf timeout ;;
+		5'|'*|6'|'*) printf dns_failed ;;
+		7'|'*) printf connect_failed ;;
+		35'|'*) printf tls_handshake_failed ;;
+		51'|'*|58'|'*|60'|'*|77'|'*) printf tls_verification_failed ;;
+		47'|'*) printf redirect_rejected ;;
+		*'|'408|*'|'429|*'|'500|*'|'502|*'|'503|*'|'504) printf server_temporary ;;
+		18'|'*|52'|'*|55'|'*|56'|'*|92'|'*) printf connection_interrupted ;;
+		0'|'*) printf invalid_heartbeat_response ;;
+		*) printf request_failed ;;
+	esac
+}
+
+heartbeat_diagnostics() {
+	local state
+	state="${TMPDIR:-/tmp}/owrt-remote-heartbeat-last"
+	printf 'Последний Heartbeat (только безопасные поля):\n'
+	if [ -r "$state" ]; then cat "$state"; else printf 'Замеров пока нет; выполни owrt-remote heartbeat.\n'; fi
+}
+
+send_heartbeat() (
+	local hub_url token endpoint tmp response event used fallback_base errors rc dir metrics http attempt max_attempts reason previous previous_reason safe_endpoint elapsed started diagnostic
 	event="${1:-}"
 	hub_url="$(uci_get hub_url '')"
 	token="$(uci_get hub_token '')"
@@ -1023,34 +1149,68 @@ send_heartbeat() {
 		wan_reconcile_xray
 	fi
 
-	endpoint="${hub_url%/}/api/heartbeat"
-	tmp="${TMPDIR:-/tmp}/owrt-remote-heartbeat.$$"
-	response="${TMPDIR:-/tmp}/owrt-remote-heartbeat.response.$$"
+	dir="$(mktemp -d "${TMPDIR:-/tmp}/owrt-remote-heartbeat.XXXXXX")" || return 1
+	chmod 700 "$dir"
+	trap 'rm -f "$dir/payload" "$dir/response" "$dir/response.error" "$dir/metrics" "$dir/last"; rmdir "$dir" 2>/dev/null || true' EXIT
+	trap 'exit 1' INT TERM
+	tmp="$dir/payload"; response="$dir/response"
 	errors="$response.error"
+	metrics="$dir/metrics"
+	export OWRT_REMOTE_HTTP_METRICS="$metrics"
 	heartbeat_json "$event" >"$tmp"
 	used=0
+	previous=''; previous_reason=''
 	for endpoint in $(heartbeat_candidate_endpoints); do
 		used=1
-		rc=0
-		post_json "$endpoint" "$token" "$tmp" >"$response" 2>"$errors" || rc=$?
-		if [ "$rc" = 0 ] && grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
-			fallback_base="$(heartbeat_base_from_endpoint "$endpoint")"
-			if ! heartbeat_apply_hub_update "$response" "$fallback_base"; then
-				log 'Heartbeat: Hub ответил, но обновление настроек не применилось'
-				rm -f "$tmp" "$response" "$errors"
-				return 1
-			fi
-			cat "$response"
-			log "Heartbeat: OK; Hub=$fallback_base; WAN_direct=$(uci_get wan_direct 0); WAN_active=$(cat "$WAN_STATE/active-interface" 2>/dev/null)"
-			rm -f "$tmp" "$response" "$errors"
-			return 0
+		safe_endpoint="$(remote_url_origin "$endpoint")" || { log 'Heartbeat: ошибка; reason=invalid_endpoint'; continue; }
+		if [ -n "$previous" ]; then
+			log "Heartbeat: fallback; from=$previous; to=$safe_endpoint; reason=$previous_reason; предыдущие попытки исчерпаны"
 		fi
-		log "Heartbeat: ошибка; endpoint=$endpoint; rc=$rc; $(head -c 1024 "$errors"); ответ=$(head -c 1024 "$response")"
+		attempt=1; max_attempts=1
+		case "$endpoint" in https://*) max_attempts=2 ;; esac
+		while [ "$attempt" -le "$max_attempts" ]; do
+			rc=0; : >"$metrics"; started="$(remote_clock_ms)"
+			post_json "$endpoint" "$token" "$tmp" >"$response" 2>"$errors" || rc=$?
+			elapsed=$(( $(remote_clock_ms) - started ))
+			http="$(sed -n 's/.*HTTP=\([0-9][0-9][0-9]\).*/\1/p' "$metrics" | tail -n 1)"
+			reason="$(heartbeat_failure_reason "$rc" "$http")"
+			if grep -Fq 'Failed to allocate uclient context' "$errors"; then reason=http_client_context_failed; fi
+			diagnostic="endpoint=$safe_endpoint; attempt=$attempt/$max_attempts; rc=$rc; reason=$reason; elapsed_ms=$elapsed; $(tail -n 1 "$metrics")"
+			printf '%s\n' "$diagnostic" >"$dir/last"
+			mv -f "$dir/last" "${TMPDIR:-/tmp}/owrt-remote-heartbeat-last"
+			if [ "$rc" = 0 ] && grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$response"; then
+				fallback_base="$(heartbeat_base_from_endpoint "$endpoint")"
+				if ! heartbeat_apply_hub_update "$response" "$fallback_base"; then
+					log 'Heartbeat: Hub ответил, но обновление настроек не применилось'
+					return 1
+				fi
+				# Stable OK messages remain deduplicated by the RAM journal;
+				# fresh timings are available separately in network-diagnostics.
+				printf '%s\n' "endpoint=$safe_endpoint; attempt=$attempt/$max_attempts; rc=0; reason=ok; elapsed_ms=$elapsed; $(tail -n 1 "$metrics")" >"$dir/last"
+				mv -f "$dir/last" "${TMPDIR:-/tmp}/owrt-remote-heartbeat-last"
+				cat "$response"
+				log "Heartbeat: OK; Hub=$safe_endpoint; WAN_direct=$(uci_get wan_direct 0); WAN_active=$(cat "$WAN_STATE/active-interface" 2>/dev/null)"
+				return 0
+			fi
+			# Do not log curl stderr or response bodies: either may echo secrets.
+			log "Heartbeat: ошибка; $diagnostic"
+			[ "$reason" != auth_rejected ] || return 1
+			case "$reason" in timeout|dns_failed|connect_failed|tls_handshake_failed|server_temporary|connection_interrupted)
+				if [ "$attempt" -lt "$max_attempts" ]; then
+					attempt=$((attempt+1))
+					log "Heartbeat: retry HTTPS; endpoint=$safe_endpoint; attempt=$attempt/$max_attempts; reason=$reason; delay=1s"
+					sleep 1
+					continue
+				fi ;;
+			esac
+			break
+		done
+		previous="$safe_endpoint"; previous_reason="$reason"
 	done
-	rm -f "$tmp" "$response" "$errors"
 	[ "$used" = "1" ] || die "hub_url/public_url/vps_host пустые"
+	case "$hub_url" in https://*) log 'Heartbeat: fallback остановлен; reason=https_required; автоматический переход на HTTP отключён' ;; esac
 	return 1
-}
+)
 
 wan_reconcile_xray() {
 	local config bound device
@@ -1417,6 +1577,7 @@ case "$cmd" in
 		;;
 	network-diagnostics)
 		wan_diagnostics
+		heartbeat_diagnostics
 		;;
 	install-xray-tmp)
 		install_xray_tmp
@@ -1439,6 +1600,9 @@ case "$cmd" in
 		;;
 	heartbeat-loop)
 		heartbeat_loop
+		;;
+	heartbeat-diagnostics)
+		heartbeat_diagnostics
 		;;
 	logs-sync)
 		sync_global_logs

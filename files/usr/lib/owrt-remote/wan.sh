@@ -103,37 +103,114 @@ wan_dns_server() {
 	printf '%s' "$dns"
 }
 
+wan_dns_metric() {
+	[ -n "${OWRT_REMOTE_DNS_METRICS:-}" ] || return 0
+	printf '%s %s\n' "$1" "$2" >"$OWRT_REMOTE_DNS_METRICS"
+}
+
+wan_dns_ipv4() {
+	# DNS cache entries must be unambiguous IPv4, never IPv6 or a fake-IP.
+	case "$1" in ''|198.18.*|198.19.*) return 1 ;; esac
+	printf '%s\n' "$1" | awk -F. '
+		NF != 4 { exit 1 }
+		{ for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i > 255 || (length($i)>1 && $i ~ /^0/)) exit 1 }
+	'
+}
+
+wan_dns_a_reply() {
+	# BusyBox prints the resolver Address before the answer. Only trust an
+	# Address belonging to the queried Name (or its CNAME chain), with rc=0.
+	awk -v host="$1" -v rc="$2" '
+		function name(s) { s=tolower(s); sub(/\.$/, "", s); return s }
+		function ipv4(s, a,n,i) {
+			n=split(s,a,"."); if (n!=4) return 0
+			for(i=1;i<=4;i++) if(a[i]!~/^[0-9]+$/ || a[i]>255 || (length(a[i])>1 && a[i]~/^0/)) return 0
+			return 1
+		}
+		BEGIN { allowed[name(host)]=1 }
+		{
+			text=tolower($0)
+			if(text ~ /timed out|connection timeout/) timed_out=1
+			if(text ~ /: (no answer|nxdomain|nodata)([[:space:]]|$)/) no_a=1
+			if(text ~ /: parse error([[:space:]]|$)/) bad=1
+			if(text ~ /: (servfail|refused|formerr|notimp)([[:space:]]|$)/) dns_error=1
+		}
+		/^[[:space:]]*Server:/ { server=1; owner=""; next }
+		$2 == "canonical" && $3 == "name" && $4 == "=" {
+			aliases[++alias_count]=name($1); targets[alias_count]=name($5); next
+		}
+		/^[[:space:]]*Name:/ {
+			owner=name($2); named=1
+			if(NF!=2 || owner !~ /^[a-z0-9_.-]+$/) { owner=""; bad=1 }
+			next
+		}
+		/^[[:space:]]*Address([[:space:]]+[0-9]+)?:/ {
+			if(owner=="") next
+			field=($1=="Address:" ? 2 : 3)
+			if(ipv4($field)) {
+				owners[++count]=owner; ips[count]=$field
+			} else if(index($field,":")==0) bad=1
+		}
+		END {
+			for(pass=1;pass<=alias_count;pass++)
+				for(i=1;i<=alias_count;i++) if(allowed[aliases[i]]) allowed[targets[i]]=1
+			if(rc==0 && !bad && !dns_error) for(i=1;i<=count;i++) if(allowed[owners[i]]) {
+				if(ips[i] ~ /^198\.(18|19)\./) { rejected=1; continue }
+				print "ok", ips[i]; exit
+			}
+			if(timed_out) print "timeout"
+			else if(bad) print "parse_error"
+			else if(dns_error) print "resolver_error"
+			else if(rejected) print "rejected_address"
+			else if(no_a || (rc==0 && count==0 && (server || named))) print "no_a_record"
+			else if(rc!=0) print "resolver_error"
+			else print "parse_error"
+		}
+	'
+}
+
 wan_resolve_host() {
-	local host dns answer cache now saved_ts saved_ip
+	local host dns answer cache now saved_ts saved_ip saved_age started reply rc result reason
 	host="$1"
-	wan_ip_literal "$host" && { printf '%s' "$host"; return; }
+	wan_ip_literal "$host" && { wan_dns_metric 0 literal; printf '%s' "$host"; return; }
 	case "$host" in ''|*[!a-zA-Z0-9_.-]*) return 1 ;; esac
 	dns="$(wan_dns_server)" || return 1
 	cache="$WAN_STATE/resolve-$(safe_id "$host-$dns")"
 	now="$(date +%s)"
 	saved_ts=0; saved_ip=''
-	[ ! -r "$cache" ] || read -r saved_ts saved_ip <"$cache"
-	if [ -n "$saved_ip" ] && [ $((now - saved_ts)) -lt 300 ]; then
+	if [ -r "$cache" ]; then
+		read -r saved_ts saved_ip <"$cache" || { saved_ts=0; saved_ip=''; }
+	fi
+	# Reject corrupted/future timestamps and non-IPv4 cache contents before
+	# arithmetic or fallback; keep the existing 5 minute / 1 hour limits.
+	case "$saved_ts" in ''|0*|*[!0-9]*|???????????*) saved_ts=0; saved_ip='' ;; esac
+	saved_age=$((now - saved_ts))
+	if [ "$saved_age" -lt 0 ] || ! wan_dns_ipv4 "$saved_ip"; then saved_ip=''; fi
+	if [ -n "$saved_ip" ] && [ "$saved_age" -lt 300 ]; then
+		wan_dns_metric 0 cache
 		printf '%s' "$saved_ip"; return
 	fi
 	# Query WAN's resolver explicitly, never the local dnsmasq/sing-box resolver.
-	answer="$(nslookup -timeout=3 -retry=1 "$host" "$dns" 2>/dev/null | awk '
-		/^Name:/ { in_answer=1 }
-		in_answer && /^Address([[:space:]][0-9]+)?:/ {
-			for (i=2;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit }
-		}')"
-	case "$answer" in 198.18.*|198.19.*) answer='' ;; esac
-	if wan_ip_literal "$answer"; then
+	started=''
+	[ -z "${OWRT_REMOTE_DNS_METRICS:-}" ] || started="$(remote_clock_ms)"
+	# Without -type=A BusyBox queries both A and AAAA, so an empty AAAA
+	# answer can be confused with an IPv4 failure. Preserve nslookup status.
+	rc=0
+	reply="$(LC_ALL=C nslookup -type=A -timeout=3 -retry=1 "$host" "$dns" 2>&1)" || rc=$?
+	[ -z "$started" ] || wan_dns_metric "$(( $(remote_clock_ms) - started ))" lookup
+	result="$(printf '%s\n' "$reply" | wan_dns_a_reply "$host" "$rc")"
+	reason="${result%% *}"; answer="${result#* }"
+	if [ "$reason" = ok ] && wan_dns_ipv4 "$answer"; then
 		mkdir -p "$WAN_STATE"
 		printf '%s %s\n' "$now" "$answer" >"$cache.tmp.$$"
 		mv "$cache.tmp.$$" "$cache"
 		printf '%s' "$answer"; return
 	fi
-	if [ -n "$saved_ip" ] && [ $((now - saved_ts)) -lt 3600 ]; then
-		log "WAN DNS unavailable for $host; using last successful WAN address $saved_ip"
+	if [ -n "$saved_ip" ] && [ "$saved_age" -lt 3600 ]; then
+		log "WAN DNS unavailable for $host; reason=$reason; resolver=$dns; rc=$rc; using last successful WAN address $saved_ip"
 		printf '%s' "$saved_ip"; return
 	fi
-	log "WAN DNS failed: host=$host resolver=$dns"
+	log "WAN DNS failed: host=$host resolver=$dns type=A reason=$reason rc=$rc"
 	return 1
 }
 
@@ -143,6 +220,7 @@ wan_endpoint_ip() {
 	pinned="$(uci_get vps_host '')"
 	# Preserve HTTP Host and TLS SNI while connecting to the manually pinned VPS.
 	if ! wan_ip_literal "$host" && [ "$(vps_host_mode)" = manual ] && wan_ip_literal "$pinned"; then
+		wan_dns_metric 0 pinned
 		printf '%s' "$pinned"
 	else
 		wan_resolve_host "$host"
@@ -388,9 +466,9 @@ wan_prepare() (
 	wan_prepare_locked
 )
 
-wan_post_json() {
-	local url token file host port ip device selected OWRT_REMOTE_ACTIVE_WAN_INTERFACE
-	url="$1"; token="$2"; file="$3"
+wan_http_target() {
+	local url host port ip device selected OWRT_REMOTE_ACTIVE_WAN_INTERFACE
+	url="$1"
 	selected="$(wan_select_interface)" || return 1
 	if [ "$selected" != "$(cat "$WAN_STATE/active-interface" 2>/dev/null)" ]; then
 		wan_prepare || return 1
@@ -398,7 +476,7 @@ wan_post_json() {
 	OWRT_REMOTE_ACTIVE_WAN_INTERFACE="$(cat "$WAN_STATE/active-interface")" || return 1
 	host="$(wan_url_host "$url")"
 	port="$(wan_url_port "$url")" || return 1
-	ip="$(wan_endpoint_ip "$url")" || return 1
+	ip="$(OWRT_REMOTE_DNS_METRICS="${OWRT_REMOTE_DNS_STATS_FILE:-}" wan_endpoint_ip "$url")" || return 1
 	device="$(wan_device)" || return 1
 	# A resolver cache may expire between prepare and this request. Refresh
 	# direct routes before sending to a newly resolved IP.
@@ -407,13 +485,12 @@ wan_post_json() {
 		grep -Fqx "$ip $port" "$WAN_STATE/endpoints" || return 1
 	fi
 	case "$ip" in *:*) ip="[$ip]" ;; esac
-	# Follow nginx HTTP-to-HTTPS redirects while preserving this JSON POST.
-	# Host and TLS SNI remain the configured URL's; no certificate bypass is used.
-	curl -fsSL --location --max-redirs 3 --post301 --post302 --post303 \
-		--noproxy '*' --interface "$device" --connect-timeout 4 --max-time 10 \
-		--resolve "$host:$port:$ip" \
-		-H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-		--data-binary "@$file" "$url"
+	printf '%s|%s:%s:%s' "$device" "$host" "$port" "$ip"
+}
+
+wan_post_json() {
+	# Resolve and bind every approved redirect separately, including HTTPS.
+	remote_curl_post "$1" "$2" "$3" wan
 }
 
 wan_cleanup() {

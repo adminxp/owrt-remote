@@ -34,14 +34,18 @@ wan_prepare() { echo prepare >>"$TEST_ROOT/requests"; [ "${TEST_WAN_FAIL:-0}" !=
 xray_running() { [ "${TEST_XRAY_RUNNING:-0}" = 1 ]; }
 wan_post_json() { echo direct >>"$TEST_ROOT/requests"; fake_post "$1" "$3"; }
 curl() {
-    local file arg next url
-    next=0; file=''
+    local file arg next url output
+    next=''; file=''; output=''
     for arg in "$@"; do
-        [ "$next" != 1 ] || { file="${arg#@}"; next=0; }
-        [ "$arg" != --data-binary ] || next=1
+        case "$next" in
+            data) file="${arg#@}"; next=''; continue ;;
+            output) output="$arg"; next=''; continue ;;
+        esac
+        case "$arg" in --data-binary) next=data ;; -o) next=output ;; esac
         url="$arg"
     done
-    fake_post "$url" "$file"
+    fake_post "$url" "$file" >"$output" || return $?
+    printf '200 0.001 0.002 0.003 0.004 0.005\n'
 }
 fake_post() {
     echo "$1" >>"$TEST_ROOT/requests"

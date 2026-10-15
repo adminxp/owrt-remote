@@ -84,7 +84,8 @@ render_page() { printf 'KIND=%s\nTITLE=%s\nBODY=%s\nDRAFT=%s\n' "$RESULT_KIND" "
                                 env={**self.env, "REQUEST_METHOD": "POST", "CONTENT_TYPE": "application/x-www-form-urlencoded",
                                      "CONTENT_LENGTH": str(len(body))}, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
-        self.assertFalse(list(self.directory.glob("owrt-remote-*")), "CGI temporary files must be removed")
+        leftovers = [path for path in self.directory.glob("owrt-remote-*") if path.name != "owrt-remote-heartbeat-last"]
+        self.assertFalse(leftovers, "CGI temporary files must be removed")
         return result.stdout.decode("utf-8")
 
     def test_mobile_smart_quotes_reproduce_uci_255_and_are_repaired(self):
@@ -219,7 +220,7 @@ logger() { :; }
         response = self.post(script.replace("\n", "\r\n"))
         self.assertIn("KIND=bad", response)
         self.assertIn("Ошибка отправки Heartbeat после применения настроек", response)
-        self.assertIn("Failed to allocate uclient context", response)
+        self.assertIn("reason=http_client_context_failed", response)
         self.assertNotIn("каждая команда должна быть на отдельной строке", response)
         self.assertTrue(self.directory.joinpath("restarted").exists())
 
