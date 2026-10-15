@@ -5362,6 +5362,18 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
                   </div>
                 </div>
               </details>
+              <details class="authGroup" id="routerUpdatesGroup" {'hidden' if not is_owner else ''}>
+                <summary class="authGroupSummary">
+                  <div class="authGroupTitle">
+                    <strong>Обновить все роутеры разом</strong>
+                    <span>Общая команда и SSH-пароль, последовательное обновление с итогом по каждому роутеру.</span>
+                  </div>
+                  <span class="authGroupChevron" aria-hidden="true">⌄</span>
+                </summary>
+                <div class="authGroupBody">
+                  <a class="sessionBtn btn" href="/router-updates/" target="_blank" rel="noopener noreferrer">Открыть терминал обновления</a>
+                </div>
+              </details>
               <details class="authGroup" id="backupGroup">
                 <summary class="authGroupSummary">
                   <div class="authGroupTitle">
@@ -9745,7 +9757,7 @@ function renderDelegatedOverview(meta) {{
   authSummary.innerHTML = assigned.length
     ? assigned.map((item) => `<span class="authPill">${{escapeHtml((item.name || item.id) + ' [' + (item.flag_label || '-') + ']')}}</span>`).join('')
     : '<span class="authPill off">Роутеры не назначены</span>';
-  ['securityGroup', 'socialGroup', 'notifyGroup', 'backupGroup', 'delegatedUsersGroup'].forEach((id) => {{
+  ['securityGroup', 'socialGroup', 'notifyGroup', 'backupGroup', 'delegatedUsersGroup', 'routerUpdatesGroup'].forEach((id) => {{
     const node = document.getElementById(id);
     if (node) node.hidden = true;
   }});
@@ -10096,7 +10108,7 @@ function renderAuthMeta() {{
     loadPushStatus({{silent: true}});
     return;
   }}
-  ['securityGroup', 'socialGroup', 'notifyGroup', 'backupGroup', 'delegatedUsersGroup'].forEach((id) => {{
+  ['securityGroup', 'socialGroup', 'notifyGroup', 'backupGroup', 'delegatedUsersGroup', 'routerUpdatesGroup'].forEach((id) => {{
     const node = document.getElementById(id);
     if (node) node.hidden = false;
   }});
@@ -12201,6 +12213,54 @@ window.setTimeout(focusTerminal, 80);
 </script>
 </body>
 </html>"""
+
+
+def router_updates_html(csrf):
+    default_command = 'wget -O - "' + RAW_REPO_BASE + '/install.sh?v=$(date +%s)" | sh'
+    return r'''<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Обновить все роутеры — OpenWrt Remote Hub</title><style>
+:root{color-scheme:dark;--line:rgba(169,126,255,.3);--muted:#b9adc9}
+*{box-sizing:border-box}body{min-height:100vh;margin:0;background:#07040f;background-image:radial-gradient(circle at 16% 10%,#a855f740,transparent 35%),linear-gradient(145deg,#07040f,#120a24 54%,#05030a);background-attachment:fixed;color:#f7f2ff;font:14px/1.5 system-ui,sans-serif}
+.wrap{max-width:1100px;margin:auto;padding:20px}.panel{margin-bottom:14px;padding:18px;border:1px solid var(--line);border-radius:12px;background:#191226e8}.head,.actions{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 10px}.hint{color:var(--muted);font-size:13px}.note{margin:14px 0;padding:10px 12px;border:1px solid #f59e0b70;border-left:3px solid #f59e0b;border-radius:8px;background:#f59e0b12;color:#fde68a}
+label{display:block;margin:14px 0 6px;font-weight:700}textarea,input{display:block;width:100%;min-width:0;border:1px solid var(--line);border-radius:8px;background:#0d0917;color:#f7f2ff;padding:11px;font:14px/1.5 ui-monospace,Consolas,monospace}textarea{min-height:110px;resize:vertical}input{max-width:480px}button,.btn{display:inline-flex;align-items:center;justify-content:center;min-height:42px;border:1px solid var(--line);border-radius:8px;padding:9px 14px;background:#393044;color:#f7f2ff;font:700 13px system-ui;cursor:pointer;text-decoration:none}.primary{background:#7c3aed}button:disabled{opacity:.5;cursor:default}.actions{justify-content:flex-start;margin-top:16px}.ok{color:#86efac}.error{color:#fda4af}.warn{color:#fde68a}#status{margin:12px 0;overflow-wrap:anywhere}.router{border-top:1px solid var(--line);padding:13px 0}.router:first-child{border-top:0}.router strong{display:block;overflow-wrap:anywhere}.router p{margin:5px 0;overflow-wrap:anywhere}.router small{color:var(--muted)}pre{max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0d0917;border:1px solid var(--line);border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace}summary{cursor:pointer;color:var(--muted)}
+@media(max-width:680px){.wrap{padding:10px}.panel{padding:12px}.head{align-items:stretch;flex-direction:column}h1{font-size:19px}.actions{display:grid;grid-template-columns:1fr}.btn,button{width:100%}input{max-width:none}body{background-attachment:scroll}}
+</style></head><body><main class="wrap">
+<section class="panel"><div class="head"><h1>Обновить все роутеры разом</h1><a class="btn" href="/">Вернуться в Hub</a></div>
+<blockquote class="note">Команда выполняется на роутерах по очереди через SSH. Укажи один общий SSH-пароль root. Для каждого роутера будет отдельный итог. Если туннель не работает, обновить этот роутер через VPS не получится.</blockquote>
+<form id="updateForm"><label for="command">Команда обновления</label><textarea id="command" name="command" required maxlength="8192" autocapitalize="off" autocorrect="off" spellcheck="false">__COMMAND__</textarea>
+<label for="sshPassword">Общий SSH-пароль root на роутерах</label><input id="sshPassword" name="ssh_password" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Оставь пустым, если настроен SSH-ключ">
+<div class="hint">Пароль используется только текущей очередью и не сохраняется на диске или в браузере. Закрытие вкладки не останавливает обновления. Перезапуск Hub прерывает очередь; начатая установка на роутере продолжает работать.</div>
+<div class="actions"><button class="primary" id="start" type="submit" disabled>Обновить все по очереди</button><button id="cancel" type="button" disabled>Остановить очередь после текущего</button></div></form>
+<div id="status" role="status" aria-live="polite">Получаю список роутеров…</div></section>
+<section class="panel"><h2>Ход обновления</h2><div id="results"></div></section>
+</main><script>
+(()=>{
+  const csrf=__CSRF__, endpoint='/api/router-updates', form=document.getElementById('updateForm'), command=document.getElementById('command'), password=document.getElementById('sshPassword'), start=document.getElementById('start'), cancel=document.getElementById('cancel'), status=document.getElementById('status'), results=document.getElementById('results');
+  let timer=null, pending=false, job=null, lastRender='', stopped=false, generation=0;
+  let requestId='';
+  const requestKey='owrt-router-update-request';
+  try{requestId=sessionStorage.getItem(requestKey)||'';}catch(error){}
+  function requestToken(){if(!requestId){const bytes=crypto.getRandomValues(new Uint8Array(16));requestId=Array.from(bytes,n=>n.toString(16).padStart(2,'0')).join('');try{sessionStorage.setItem(requestKey,requestId);}catch(error){}}return requestId;}
+  function forgetRequest(){requestId='';try{sessionStorage.removeItem(requestKey);}catch(error){}}
+  function controls(){const active=job&&job.state==='running';start.disabled=pending||active;command.disabled=pending||active;password.disabled=pending||active;cancel.disabled=pending||!active||job.cancel_requested;}
+  function render(data){
+    job=data.job;controls();const items=job?job.items:(data.routers||[]), signature=JSON.stringify(items);if(signature===lastRender)return;lastRender=signature;
+    const open=new Map(Array.from(results.querySelectorAll('article')).map(row=>[row.dataset.router,{open:!!row.querySelector('details[open]'),top:row.querySelector('pre')?.scrollTop||0}])), fragment=document.createDocumentFragment();
+    items.forEach(item=>{const row=document.createElement('article'), title=document.createElement('strong'), detail=document.createElement('p'), id=document.createElement('small');
+      row.className='router';row.dataset.router=item.id;title.textContent=(item.state==='success'?'Успешно — ':item.state==='error'?'Ошибка — ':item.state==='unknown'?'Не подтверждено — ':'')+(item.name||item.id);title.className=item.state==='success'?'ok':item.state==='error'?'error':item.state==='unknown'?'warn':'';detail.textContent=item.message||'Готов к постановке в очередь';id.textContent=item.id;row.append(title,id,detail);
+      if(item.output){const details=document.createElement('details'), summary=document.createElement('summary'), output=document.createElement('pre');summary.textContent='Вывод команды';output.textContent=item.output;details.open=!!open.get(item.id)?.open;details.append(summary,output);row.append(details);}fragment.append(row);
+    });results.replaceChildren(fragment);results.querySelectorAll('article').forEach(row=>{const output=row.querySelector('pre');if(output)output.scrollTop=open.get(row.dataset.router)?.top||0;});
+  }
+  function summary(){if(!job)return 'В очереди будут все роутеры из Hub.';const items=job.items, count=state=>items.filter(x=>x.state===state).length;return (job.state==='running'?'Обновление выполняется. ':'Очередь завершена. ')+'Успешно: '+count('success')+' · Ошибок: '+count('error')+' · Не подтверждено: '+count('unknown')+' · Пропущено: '+count('skipped')+' · Всего: '+items.length;}
+  async function api(path,body){const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),15000);try{const response=await fetch(endpoint+path,{method:body?'POST':'GET',cache:'no-store',headers:body?{'Content-Type':'application/json','X-Router-Update-CSRF':csrf}:{},body:body?JSON.stringify(body):undefined,signal:controller.signal});if(response.status===401){window.location.replace('/login');throw new Error('Нужен вход в Hub');}const data=await response.json();if(!response.ok)throw new Error(data.error||'HTTP '+response.status);return data;}finally{clearTimeout(timeout);}}
+  async function refresh(){if(stopped||pending)return;const current=++generation;if(timer!==null)clearTimeout(timer);timer=null;try{const data=await api('');if(current!==generation||pending)return;render(data);status.className='';status.textContent=summary();if(job&&job.state!=='running'&&job.request_id===requestId)forgetRequest();}catch(error){if(current===generation){status.className='error';status.textContent='Не удалось получить состояние: '+error.message;}}finally{if(!stopped&&!pending&&current===generation)timer=setTimeout(refresh,3000);}}
+  form.addEventListener('submit',async event=>{event.preventDefault();if(pending||(job&&job.state==='running'))return;generation++;pending=true;controls();if(timer!==null)clearTimeout(timer);try{const body={command:command.value,ssh_password:password.value,request_id:requestToken()};const data=await api('/start',body);password.value='';render(data);status.className='';status.textContent=summary();}catch(error){password.value='';status.className='error';status.textContent='Запуск не подтверждён: '+error.message+'. Проверяю состояние очереди.';}finally{pending=false;controls();if(!stopped)timer=setTimeout(refresh,1000);}});
+  cancel.addEventListener('click',async()=>{if(!job||pending)return;generation++;if(timer!==null)clearTimeout(timer);pending=true;controls();try{const data=await api('/cancel',{id:job.id});render(data);status.textContent='Текущая установка завершится; остальные роутеры будут пропущены.';}catch(error){status.textContent=error.message;}finally{pending=false;controls();if(!stopped)timer=setTimeout(refresh,1000);}});
+  window.addEventListener('pagehide',()=>{stopped=true;if(timer!==null)clearTimeout(timer);password.value='';});
+  window.addEventListener('pageshow',()=>{if(stopped){stopped=false;refresh();}});refresh();
+})();
+</script></body></html>'''.replace('__COMMAND__', html.escape(default_command)).replace('__CSRF__', json.dumps(csrf))
 
 
 def router_logs_html(router):
@@ -14323,6 +14383,299 @@ class VpsResourceMonitor:
             return self.cached
 
 
+def router_update_launch_script(task_id, command):
+    """Stage a detached router-side task; never execute the owner's command on VPS."""
+    encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
+    return r'''set -eu
+umask 077
+job=/tmp/owrt-remote-update-__TASK__
+if [ ! -d "$job" ]; then
+    command -v setsid >/dev/null || { echo 'setsid is required'; exit 1; }
+    mkdir "$job"
+    printf '%s' '__COMMAND__' | base64 -d >"$job/command.sh"
+    cat >"$job/runner.sh" <<'OWRT_UPDATE_RUNNER'
+#!/bin/sh
+umask 077
+job=$1
+printf '%s\n' "$$" >"$job/pid"
+mkfifo "$job/stream" || exit 1
+# A bounded output tail in RAM. No growing log file, shell variable containing
+# the whole output, or writer that survives a normally completed command.
+(
+    while :; do
+        dd bs=4096 count=1 iflag=fullblock <&3 >"$job/chunk" 2>/dev/null
+        [ -s "$job/chunk" ] || break
+        cat "$job/chunk" >>"$job/output"
+        bytes=$(wc -c <"$job/output")
+        if [ "$bytes" -gt 32768 ]; then
+            tail -c 16384 "$job/output" >"$job/output.new" && mv "$job/output.new" "$job/output"
+        fi
+    done 3<"$job/stream"
+) &
+reader=$!
+# BusyBox ash's pipefail also catches wget failures in `wget ... | sh`.
+/bin/sh -ec 'set -o pipefail; . "$1"' sh "$job/command.sh" >"$job/stream" 2>&1
+rc=$?
+wait "$reader" || { [ "$rc" -ne 0 ] || rc=125; }
+printf '%s\n' "$rc" >"$job/result.new"
+mv "$job/result.new" "$job/result"
+rm -f "$job/stream" "$job/chunk" "$job/command.sh" "$job/runner.sh"
+OWRT_UPDATE_RUNNER
+    # OpenWrt supplies setsid by default; nohup is optional. Ignore HUP before
+    # exec so loss of the reverse SSH connection cannot kill the installer.
+    (trap '' HUP; exec setsid /bin/sh "$job/runner.sh" "$job") </dev/null >/dev/null 2>&1 &
+fi
+printf 'OWRT_UPDATE_NAME='
+(uci -q get owrtremote.main.router_name || true) | head -c 512 | base64 | tr -d '\r\n'
+printf '\nOWRT_UPDATE_STARTED=1\n'
+'''.replace('__TASK__', task_id).replace('__COMMAND__', encoded)
+
+
+def router_update_poll_script(task_id, cleanup=False):
+    prefix = 'job=/tmp/owrt-remote-update-' + task_id + '\n'
+    if cleanup:
+        return prefix + '''[ -s "$job/result" ] || exit 0
+rm -f "$job/result" "$job/result.new" "$job/pid" "$job/output" "$job/output.new" "$job/chunk" "$job/stream" "$job/command.sh" "$job/runner.sh"
+rmdir "$job" 2>/dev/null || true
+'''
+    return prefix + r'''if [ ! -d "$job" ]; then echo OWRT_UPDATE_STATE=missing; exit 0; fi
+if [ -s "$job/result" ]; then
+    printf 'OWRT_UPDATE_RC='; cat "$job/result"
+    echo OWRT_UPDATE_STATE=done
+elif [ -s "$job/pid" ] && kill -0 "$(cat "$job/pid")" 2>/dev/null; then
+    echo OWRT_UPDATE_STATE=running
+else
+    echo OWRT_UPDATE_STATE=starting
+fi
+printf 'OWRT_UPDATE_OUTPUT='
+tail -c 8192 "$job/output" 2>/dev/null | base64 | tr -d '\r\n'
+printf '\n'
+'''
+
+
+def router_update_fields(output):
+    fields = {}
+    for line in str(output or '').splitlines():
+        key, separator, value = line.partition('=')
+        if separator and key.startswith('OWRT_UPDATE_'):
+            fields[key.removeprefix('OWRT_UPDATE_')] = value
+    for key in ('NAME', 'OUTPUT'):
+        try:
+            fields[key] = base64.b64decode(fields.get(key, ''), validate=True).decode('utf-8', 'replace')
+        except (ValueError, UnicodeError):
+            fields[key] = ''
+    return fields
+
+
+class RouterUpdateManager:
+    """One sequential owner-controlled queue per Hub, independent of the browser."""
+    POLL_SECONDS = 3
+    ROUTER_TIMEOUT = 900
+    RESULT_TTL = 7200
+
+    def __init__(self, app):
+        self.app = app
+        self.lock = threading.Lock()
+        self.csrf = secrets.token_urlsafe(32)
+        self.job = None
+        self.thread = None
+        self.stopping = threading.Event()
+
+    def _ssh(self, row, script, password):
+        # These transport helpers use no request headers or client connection.
+        helper = Handler.__new__(Handler)
+        return helper.run_router_ssh_script(row, script, timeout=20, ssh_password=password)
+
+    def snapshot(self):
+        with self.lock:
+            if self.job and self.job['state'] != 'running' and time.time() - self.job['finished_at'] > self.RESULT_TTL:
+                self.job = None
+            return json.loads(json.dumps(self.job)) if self.job else None
+
+    def start(self, command, password, request_id):
+        if not isinstance(command, str) or not command.strip() or len(command.encode('utf-8')) > 8192 or '\x00' in command:
+            raise ValueError('Укажи команду обновления размером до 8 КиБ без нулевых символов.')
+        if not isinstance(password, str) or len(password.encode('utf-8')) > 1024 or '\x00' in password:
+            raise ValueError('Некорректный SSH-пароль.')
+        if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{16,80}', request_id):
+            raise ValueError('Некорректный идентификатор запроса. Обнови страницу.')
+        command = command.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
+        with self.lock:
+            if self.job and self.job['request_id'] == request_id:
+                return self.job['id']
+            if self.job and self.job['state'] == 'running':
+                raise RuntimeError('Очередь уже запущена. Дождись её завершения или останови оставшиеся обновления.')
+            if self.stopping.is_set():
+                raise RuntimeError('Hub завершает работу. Повтори после запуска.')
+            with self.app.conn() as conn:
+                rows = [dict(row) for row in list_router_rows(conn)]
+            if not rows:
+                raise ValueError('Нет роутеров для обновления.')
+            if len(rows) > 512:
+                raise ValueError('В одной очереди поддерживается до 512 роутеров.')
+            items = []
+            for row in rows:
+                try:
+                    reported_name = json.loads(row.get('status_json') or '{}').get('name')
+                except (ValueError, AttributeError):
+                    reported_name = ''
+                items.append({'id': row['id'], 'name': str(reported_name or row.get('name') or row['id'])[:200],
+                              'state': 'queued', 'message': 'Ожидает очереди', 'output': ''})
+            job_id = secrets.token_hex(16)
+            self.job = {'id': job_id, 'request_id': request_id, 'state': 'running', 'started_at': time.time(),
+                        'finished_at': 0, 'cancel_requested': False, 'items': items}
+            self.thread = threading.Thread(target=self._run, args=(rows, command, password, job_id), daemon=True,
+                                           name='owrt-router-updates')
+            try:
+                self.thread.start()
+            except BaseException:
+                self.job = None
+                self.thread = None
+                raise
+            return job_id
+
+    def cancel(self, job_id):
+        with self.lock:
+            if not self.job or self.job['id'] != job_id:
+                raise ValueError('Очередь не найдена.')
+            self.job['cancel_requested'] = True
+
+    def _set(self, index, **values):
+        with self.lock:
+            self.job['items'][index].update(values)
+
+    def _cancelled(self):
+        with self.lock:
+            return self.stopping.is_set() or self.job['cancel_requested']
+
+    @staticmethod
+    def _safe(text, password):
+        text = str(text or '')
+        if password:
+            text = text.replace(password, '[пароль скрыт]')
+        text = redact_router_log_bytes(text.encode('utf-8', 'replace')).decode('utf-8', 'replace')
+        return re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text)[-8192:]
+
+    @classmethod
+    def _ssh_error(cls, error, password):
+        # Diagnose SSH's authentication response before the general secret
+        # filter hides its literal "password" authentication method name.
+        text = str(error or '')
+        denied = re.search(
+            r'(?im)^(?:[^\s@]+@[^\s:]+:\s*)?Permission denied'
+            r'(?:\s*\(([^)\r\n]*)\)[.!]?|,\s*please try again[.!]?|[.!]?)\s*$', text)
+        failed = re.search(r'(?im)^(?:ssh:\s*)?Authentication failed[.!]?\s*$', text)
+        if denied or failed:
+            methods = set((denied.group(1) or '').lower().replace(' ', '').split(',')) if denied else set()
+            if password:
+                if denied and denied.group(1) and not methods.intersection({'password', 'keyboard-interactive'}):
+                    return 'SSH-сервер не предлагает вход по паролю. Проверь разрешение входа root по SSH.'
+                return ('Общий SSH-пароль не принят этим роутером. Возможно, пароль роутера отличается '
+                        'от общего; проверь его пароль и разрешение входа root по SSH.')
+            return 'SSH-авторизация отклонена. Укажи пароль root или проверь SSH-ключ доступа к этому роутеру.'
+        return cls._safe(text, password)[:1200] or 'Ошибка подключения по SSH'
+
+    def _run(self, rows, command, password, job_id):
+        try:
+            for index, row in enumerate(rows):
+                if self._cancelled():
+                    self._set(index, state='skipped', message='Пропущен: очередь остановлена')
+                    continue
+                try:
+                    # Reload ports/deletion state immediately before this router,
+                    # without retaining a database connection during SSH waits.
+                    with self.app.conn() as conn:
+                        current = get_active_router(conn, row['id'])
+                        current = dict(current) if current else None
+                    if not current:
+                        self._set(index, state='skipped', message='Роутер удалён из Hub')
+                        continue
+                    self._update_one(index, current, command, password, job_id)
+                    with self.lock:
+                        # Do not start a second installation while the first may
+                        # still be running behind a disconnected SSH tunnel.
+                        if self.job['items'][index]['state'] == 'unknown':
+                            self.job['cancel_requested'] = True
+                except Exception as exc:
+                    self._set(index, state='error', message=self._ssh_error(exc, password))
+        finally:
+            password = ''
+            command = ''
+            with self.lock:
+                self.job['state'] = 'finished'
+                self.job['finished_at'] = time.time()
+
+    def _update_one(self, index, row, command, password, job_id):
+        if not int(row.get('ssh_entry_port') or 0):
+            self._set(index, state='skipped', message='SSH-туннель не настроен')
+            return
+        task_id = job_id + '-' + str(index)
+        self._set(index, state='connecting', message='Подключаюсь по SSH')
+        ready = self._ssh(row, "printf 'OWRT_UPDATE_READY=1\\n'\n", password)
+        if 'OWRT_UPDATE_READY=1' not in ready.splitlines():
+            raise RuntimeError('SSH не подтвердил готовность. Команда обновления не отправлена.')
+        launched = False
+        launch_error = ''
+        try:
+            fields = router_update_fields(self._ssh(row, router_update_launch_script(task_id, command), password))
+            launched = fields.get('STARTED') == '1'
+            if fields.get('NAME', '').strip():
+                name = re.sub(r'[\x00-\x1f\x7f]', ' ', fields['NAME']).strip()[:200]
+                self._set(index, name=name)
+        except Exception as exc:
+            # SSH can close after the detached task was accepted. Poll its known
+            # ID instead of executing the installation a second time.
+            launch_error = self._ssh_error(exc, password)
+        self._set(index, state='running', message='Установка выполняется' if launched else 'Проверяю, запустилась ли установка')
+        deadline = time.monotonic() + (self.ROUTER_TIMEOUT if launched else 40)
+        last_error = launch_error
+        missing = 0
+        while time.monotonic() < deadline and not self.stopping.is_set():
+            try:
+                fields = router_update_fields(self._ssh(row, router_update_poll_script(task_id), password))
+                self._set(index, output=self._safe(fields.get('OUTPUT', ''), password))
+                state = fields.get('STATE')
+                if state == 'done':
+                    rc = fields.get('RC', '')
+                    if not re.fullmatch(r'\d{1,3}', rc):
+                        raise RuntimeError('Роутер вернул некорректный результат установки')
+                    self._set(index, state='success' if rc == '0' else 'error',
+                              message='Установка успешно завершена, rc=0' if rc == '0' else 'Ошибка установки, rc=' + rc)
+                    try:
+                        self._ssh(row, router_update_poll_script(task_id, cleanup=True), password)
+                    except Exception:
+                        pass
+                    return
+                if state in {'running', 'starting'} and not launched:
+                    launched = True
+                    deadline = time.monotonic() + self.ROUTER_TIMEOUT
+                if state == 'missing':
+                    missing += 1
+                    if not launched and missing < 3:
+                        self.stopping.wait(self.POLL_SECONDS)
+                        continue
+                    self._set(index, state='unknown' if launched else 'error',
+                              message=('Результат установки потерян: временные файлы отсутствуют. Успех не подтверждён.'
+                                       if launched else launch_error or 'Установка не запущена'))
+                    return
+                if state not in {'running', 'starting'}:
+                    raise RuntimeError('Не получен статус установки от роутера')
+                self._set(index, message='Установка выполняется; ожидаю итоговый код')
+            except Exception as exc:
+                last_error = self._ssh_error(exc, password)
+                self._set(index, message='SSH временно недоступен; ожидаю результат установки')
+            self.stopping.wait(self.POLL_SECONDS)
+        self._set(index, state='unknown',
+                  message='Результат не подтверждён: '
+                          + (last_error or 'истекло время ожидания'))
+
+    def stop(self):
+        self.stopping.set()
+        thread = self.thread
+        if thread and thread.ident is not None and thread is not threading.current_thread():
+            thread.join(timeout=25)
+
+
 class App:
     def __init__(self, db_path, session, agent, public_url):
         self.db_path = Path(db_path)
@@ -14334,6 +14687,7 @@ class App:
         self.router_monitor_stop = threading.Event()
         self.router_monitor_thread = None
         self.vps_resources = VpsResourceMonitor()
+        self.router_updates = RouterUpdateManager(self)
 
     @contextmanager
     def conn(self):
@@ -16017,6 +16371,51 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
         quick_commands_html = vps_quick_commands_html(public_host or "YOUR_VPS_IP")
         self.send_bytes(200, ssh_terminal_html_v2(row, ws_token, quick_commands_html).encode("utf-8"), "text/html; charset=utf-8")
 
+    def router_updates_page(self):
+        if not self.require_owner():
+            return
+        self.send_bytes(200, router_updates_html(self.app.router_updates.csrf).encode('utf-8'), 'text/html; charset=utf-8')
+
+    def router_updates_api(self, action=''):
+        if not self.require_owner(json_mode=True):
+            return
+        manager = self.app.router_updates
+        if action:
+            if not secrets.compare_digest(self.headers.get('X-Router-Update-CSRF', ''), manager.csrf):
+                self.send_json(403, {'ok': False, 'error': 'Обнови страницу терминала обновления и повтори.'})
+                return
+            origin = self.headers.get('Origin', '')
+            if origin and origin != self.request_origin():
+                self.send_json(403, {'ok': False, 'error': 'Недопустимый источник запроса.'})
+                return
+            if 'application/json' not in self.headers.get('Content-Type', ''):
+                self.send_json(415, {'ok': False, 'error': 'Ожидается JSON.'})
+                return
+            length = self.headers.get('Content-Length', '')
+            if self.headers.get('Transfer-Encoding') or not length.isdigit() or int(length) > 65536:
+                self.send_json(413, {'ok': False, 'error': 'Слишком большой запрос.'})
+                return
+            try:
+                payload = self.read_payload()
+                if not isinstance(payload, dict):
+                    raise ValueError('Ожидается объект JSON.')
+                if action == 'start':
+                    manager.start(payload.get('command'), payload.get('ssh_password', ''), payload.get('request_id'))
+                elif action == 'cancel':
+                    manager.cancel(payload.get('id'))
+            except ValueError as exc:
+                self.send_json(400, {'ok': False, 'error': str(exc)})
+                return
+            except RuntimeError as exc:
+                self.send_json(409, {'ok': False, 'error': str(exc)})
+                return
+        job = manager.snapshot()
+        routers = []
+        if not job:
+            with self.app.conn() as conn:
+                routers = [{'id': row['id'], 'name': row['name']} for row in list_router_rows(conn)]
+        self.send_json(200, {'ok': True, 'job': job, 'routers': routers})
+
     def ssh_ws(self):
         try:
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -17428,6 +17827,12 @@ exit 127
         if path == "/vps-terminal/":
             self.vps_terminal_page()
             return
+        if path in {'/router-updates', '/router-updates/'}:
+            self.router_updates_page()
+            return
+        if path == '/api/router-updates':
+            self.router_updates_api()
+            return
         if path.startswith("/api/ssh/") and path.endswith("/check"):
             self.ssh_check()
             return
@@ -17602,6 +18007,9 @@ exit 127
 
     def do_POST(self):
         path = self.parsed().path
+        if path in {'/api/router-updates/start', '/api/router-updates/cancel'}:
+            self.router_updates_api(path.rsplit('/', 1)[-1])
+            return
         if path == "/login":
             self.login()
             return
@@ -18984,6 +19392,7 @@ def cmd_serve(args):
     except KeyboardInterrupt:
         print("")
     finally:
+        app.router_updates.stop()
         app.stop_router_state_monitor()
         stop_ssh_http_sessions()
         for extra_server, thread in extra_servers:
