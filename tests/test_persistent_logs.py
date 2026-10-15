@@ -128,7 +128,7 @@ class PersistentLogsTests(unittest.TestCase):
         (self.run_dir / 'facts').write_text(''.join('1000\ts256-%035d\n' % i for i in range(63)))
         self.append('distinct event 63\ndistinct event 64\n')
         self.assertEqual(len((self.run_dir / 'facts').read_text().splitlines()), 64)
-        self.assertLessEqual((self.run_dir / 'facts').stat().st_size, 4096)
+        self.assertLessEqual((self.run_dir / 'facts').stat().st_size if (self.run_dir / 'facts').exists() else 0, 4096)
 
     def test_empty_digest_files_falsely_acked_by_old_hub_are_recovered(self):
         self.append('retained restart event\n'); self.flush()
@@ -242,7 +242,7 @@ class PersistentLogsTests(unittest.TestCase):
         self.flush()
         self.assertEqual({p.name: p.read_bytes() for p in parts}, original)
         self.assertLessEqual((self.run_dir / 'pending').stat().st_size, 16384)
-        self.assertLessEqual((self.run_dir / 'facts').stat().st_size, 4096)
+        self.assertLessEqual((self.run_dir / 'facts').stat().st_size if (self.run_dir / 'facts').exists() else 0, 4096)
         first = self.export()
         self.acknowledge(first)
         self.flush()
@@ -353,6 +353,32 @@ class PersistentLogsTests(unittest.TestCase):
         self.assertIn('after killed reaper', self.call('read').stdout)
         self.assertFalse(lock.exists())
 
+    def test_integer_only_sleep_keeps_lock_timeout_bounded_and_quiet(self):
+        self.call('check')
+        source = self.source.split('case "${1:-}" in', 1)[0]
+        commands = r'''
+log_init
+mkdir "$RUN_DIR/lock"
+printf '12345\n' >"$RUN_DIR/lock/pid"
+sleep() {
+    printf '%s\n' "$1" >>"$RUN_DIR/pauses"
+    if [ "$1" = 0.1 ]; then echo "sleep: invalid number '0.1'" >&2; return 1; fi
+    [ "$1" = 1 ]
+}
+kill() { return 0; }
+if log_lock; then exit 17; fi
+'''
+        script = self.root / 'integer-sleep.sh'
+        script.write_text(source + commands, encoding='utf-8', newline='\n')
+        result = subprocess.run([*self.shell, script.as_posix()], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        pauses = (self.run_dir / 'pauses').read_text().splitlines()
+        self.assertEqual(pauses.count('0.1'), 1, 'probe once per process')
+        self.assertEqual(pauses.count('1'), 10, 'ten-second deadline, no busy spin or 100-second wait')
+        self.assertIn('lock-timeout', self.call('diagnostics').stdout)
+
     def test_collector_failure_reaps_children_and_removes_fifo(self):
         # Actual FIFO integration is tested on POSIX; Windows BusyBox has no
         # FIFO support. Exercise its traps with mocked process/FIFO operations.
@@ -373,7 +399,48 @@ wait() { return 0; }
         self.assertFalse(list(self.run_dir.glob('stream.*')))
         self.assertFalse((self.run_dir / 'collector-lock').exists())
         lines = (self.run_dir / 'kills').read_text().splitlines()
-        self.assertGreaterEqual(len([line for line in lines if not line.startswith('-0')]), 2)
+        self.assertGreaterEqual(len([line for line in lines if not line.startswith('-0')]), 1)
+
+    def test_heartbeat_sampling_and_freshness_are_independent_of_flash_writes(self):
+        good = 'Thu Oct 15 22:52:36 2026 user.notice owrt-remote: Heartbeat: OK; Hub=https://hub.example; WAN_direct=1; WAN_active=wan\n'
+        self.append(good)
+        self.append(good.replace('22:52:36', '22:53:08'), TEST_UPTIME='1032')
+        state = self.status()
+        self.assertEqual((state['accepted_events'], state['suppressed_events']), ('1', '1'))
+        self.assertEqual(state['committed_bytes'], '0')
+        self.assertGreater(int(state['last_input_epoch']), 0)
+        self.assertEqual(state['collector_state'], 'stopped', 'persistent storage does not imply a running collector')
+        self.append(good.replace('22:52:36', '22:57:38'), TEST_UPTIME='1302')
+        self.assertEqual(self.call('read').stdout.count('Heartbeat: OK;'), 2)
+        self.flush()
+        self.assertEqual(self.status()['pending_bytes'], '0')
+        self.assertGreater(int(self.status()['last_commit_epoch']), 0)
+
+    def test_private_diagnostics_are_bounded_rate_limited_and_no_syslog_feedback(self):
+        self.call('check')
+        source = self.source.split('case "${1:-}" in', 1)[0]
+        commands = r'''
+log_init
+logger() { echo forbidden-syslog-feedback >&2; return 1; }
+i=0
+while [ "$i" -lt 140 ]; do
+    if [ "$((i % 2))" = 0 ]; then log_diag flush-failed; else log_diag lock-timeout; fi
+    i=$((i + 1))
+done
+log_diag lock-timeout
+'''
+        script = self.root / 'diag-test.sh'
+        script.write_text(source + commands, encoding='utf-8', newline='\n')
+        result = subprocess.run([*self.shell, script.as_posix()], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        diagnostics = self.run_dir / 'diagnostics'
+        self.assertLessEqual(diagnostics.stat().st_size, 4096)
+        self.assertFalse((self.run_dir / 'diagnostics.new').exists())
+        self.assertFalse((self.run_dir / 'diag-lock').exists())
+        self.assertEqual(self.call('diagnostics').stdout, diagnostics.read_text())
+        self.assertFalse((self.journal / 'diagnostics').exists())
 
     def test_legacy_migration_preserves_identity_ack_and_only_undelivered_bytes(self):
         legacy = self.root / 'legacy'

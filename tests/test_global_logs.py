@@ -108,7 +108,7 @@ class GlobalLogTests(unittest.TestCase):
         self.helper_call('append', good * 3)
         self.helper_call('append', 'Other action\n')
         self.helper_call('append', good, env={**self.env, 'TEST_UPTIME': '2000'})
-        self.assertEqual(self.helper_call('read', env={**self.env, 'TEST_UPTIME': '2000'}).count('Heartbeat: OK;'), 1)
+        self.assertEqual(self.helper_call('read', env={**self.env, 'TEST_UPTIME': '2000'}).count('Heartbeat: OK;'), 2)
         failed = 'Heartbeat: ошибка; endpoint=https://hub.example; rc=7; connection refused\n'
         self.helper_call('append', failed * 3, env={**self.env, 'TEST_UPTIME': '2001'})
         self.helper_call('append', good, env={**self.env, 'TEST_UPTIME': '2002'})
@@ -117,7 +117,7 @@ class GlobalLogTests(unittest.TestCase):
                          env={**self.env, 'TEST_UPTIME': '2004'})
         stored = self.helper_call('read', env={**self.env, 'TEST_UPTIME': '2004'})
         self.assertEqual(stored.count('[ERROR] Heartbeat:'), 2, 'same failure after recovery must appear')
-        self.assertEqual(stored.count('[OK] Heartbeat:'), 3, 'first, recovery and another WAN')
+        self.assertEqual(stored.count('[OK] Heartbeat:'), 4, 'first, periodic sample, recovery and another WAN')
 
     def test_recurring_failure_is_recorded_again_after_a_quiet_period(self):
         failure = 'owrt-remote: cannot download Xray\n'

@@ -7,10 +7,20 @@ LOG_PART_LIMIT=256
 LOG_BUFFER_LIMIT=16384
 LOG_BATCH_LIMIT=16384
 LOG_FLUSH_SECONDS=60
+LOG_HEARTBEAT_SECONDS=300
 LOG_FREE_KB=2048
 
 log_clock() { cut -d. -f1 /proc/uptime; }
 log_epoch() { date +%s; }
+log_pause() {
+	# Some OpenWrt BusyBox builds omit fractional sleep. Keep lock/reap deadlines
+	# in tenths, including the one-second fallback, instead of spinning on failure.
+	if [ "${LOG_PAUSE_TENTHS:-0}" != 10 ]; then
+		if sleep 0.1 2>/dev/null; then LOG_PAUSE_TENTHS=1; return 0; fi
+		LOG_PAUSE_TENTHS=10
+	fi
+	sleep 1
+}
 log_self_pid() {
 	# $$ is the parent shell's PID inside ash subshells/pipelines. Reading proc
 	# with the shell builtin yields the actual lock holder, including the writer.
@@ -105,8 +115,8 @@ log_lock() {
 				[ "$attempt" -lt 20 ] || log_reap_lock "$RUN_DIR/lock" "$attempt" ;;
 			*) kill -0 "$owner" 2>/dev/null || log_reap_lock "$RUN_DIR/lock" "$attempt" ;;
 		esac
-		attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || return 1
-		sleep 0.1
+		log_pause
+		attempt=$((attempt + LOG_PAUSE_TENTHS)); [ "$attempt" -lt 100 ] || { log_diag lock-timeout; return 1; }
 	done
 	log_self_pid >"$RUN_DIR/lock/pid"
 	# Another first writer may have selected storage while we waited.
@@ -139,8 +149,24 @@ log_reap_lock() {
 	owner="$(cat "$1/pid" 2>/dev/null)"
 	case "$owner" in
 		''|*[!0-9]*) rm -f "$1/pid" ;;
-		*) if kill -0 "$owner" 2>/dev/null; then rm -f "$1/reap/pid"; rmdir "$1/reap"; return 0; else rm -f "$1/pid"; fi ;;
+		*)
+			if { [ "$1" = "$RUN_DIR/collector-lock" ] && log_process_info "$owner" >/dev/null; } ||
+				{ [ "$1" != "$RUN_DIR/collector-lock" ] && kill -0 "$owner" 2>/dev/null; }; then
+				rm -f "$1/reap/pid"; rmdir "$1/reap"; return 0
+			else rm -f "$1/pid"; fi ;;
 	esac
+	if [ "$1" = "$RUN_DIR/collector-lock" ] && [ -s "$1/reader" ]; then
+		local old_reader old_birth
+		read -r old_reader old_birth <"$1/reader"
+		if [ -n "$old_birth" ] && [ "$(log_process_info "$old_reader")" = "$old_birth" ]; then
+			kill "$old_reader" 2>/dev/null || true
+			local remaining
+			remaining=0
+			while [ "$(log_process_info "$old_reader")" = "$old_birth" ] && [ "$remaining" -lt 10 ]; do log_pause; remaining=$((remaining + LOG_PAUSE_TENTHS)); done
+			if [ "$(log_process_info "$old_reader")" = "$old_birth" ]; then kill -KILL "$old_reader" 2>/dev/null || true; fi
+		fi
+		rm -f "$1/reader"
+	fi
 	rm -f "$1/reap/pid"; rmdir "$1/reap"; rmdir "$1" 2>/dev/null || true
 }
 log_fallback_locked() {
@@ -397,6 +423,7 @@ log_flush_locked() {
 		TOTAL=$((TOTAL + bytes))
 		log_checkpoint_locked && log_commit_locked || { log_warn_locked write-warning 'Flash: ошибка фиксации состояния журнала.'; return 1; }
 		: >"$RUN_DIR/pending"
+		printf '%s\n' "$(log_epoch)" >"$RUN_DIR/commit-health"
 		rm -f "$RUN_DIR/inflight"
 		rm -f "$RUN_DIR/write-warning" "$RUN_DIR/queue-warning" "$RUN_DIR/buffer-warning"
 		dropped="$(cat "$RUN_DIR/dropped" 2>/dev/null)"; dropped="${dropped:-0}"
@@ -406,6 +433,7 @@ log_flush_locked() {
 		fi
 	fi
 	log_clock >"$RUN_DIR/last-flush"
+	printf '%s %s\n' "$(log_epoch)" "$(cat "$RUN_DIR/last-flush")" >"$RUN_DIR/flush-health.new" && mv -f "$RUN_DIR/flush-health.new" "$RUN_DIR/flush-health"
 }
 log_open() {
 	log_lock || return 1
@@ -439,14 +467,22 @@ log_redact() {
 		}'
 }
 log_new_fact_locked() {
-	local key now heartbeat new_fact
+	local key now heartbeat new_fact last
 	# Compare event text without syslog timestamp, facility, PID or Xray time.
 	key="$(printf '%s\n' "$1" | tr '\t' ' ' | sed -e 's/^\[[^]]*\] *//' -e 's/.*owrt-remote\(\[[0-9][0-9]*\]\)\{0,1\}: *//' -e 's/^[0-9][0-9]*\/[0-9/:. ]* *//' -e 's/ *(\([0-9][0-9]*\)\/[0-9][0-9]*)//')"
 	heartbeat=0
 	case "$key" in
 		'Heartbeat: OK;'*)
 			heartbeat=1
-			if [ "$(cat "$RUN_DIR/heartbeat-ok" 2>/dev/null)" = "$key" ]; then return 1; fi
+			last=0
+			[ ! -f "$RUN_DIR/heartbeat-stored" ] || read -r last <"$RUN_DIR/heartbeat-stored"
+			case "$last" in ''|*[!0-9]*) last=0 ;; esac
+			now="$(log_clock)"
+			# Keep one liveness sample every five minutes, plus every change/recovery.
+			# Input freshness is tracked in RAM even when a duplicate is suppressed.
+			if [ "$(cat "$RUN_DIR/heartbeat-ok" 2>/dev/null)" = "$key" ] &&
+				[ "$now" -ge "$last" ] && [ "$((now - last))" -lt "$LOG_HEARTBEAT_SECONDS" ]; then return 1; fi
+			printf '%s\n' "$now" >"$RUN_DIR/heartbeat-stored"
 			printf '%s\n' "$key" >"$RUN_DIR/heartbeat-ok"
 			# A recovery lets the same failure appear again; keys are fixed-size hashes.
 			: >"$RUN_DIR/facts" ;;
@@ -479,24 +515,50 @@ log_new_fact_locked() {
 	[ "$new_fact" = 0 ] || return 1
 	return 0
 }
+log_event_health_locked() {
+	local epoch uptime accepted_epoch accepted_up accepted suppressed failed extra
+	accepted_epoch=0; accepted_up=0; accepted=0; suppressed=0; failed=0
+	if [ -s "$RUN_DIR/event-health" ]; then
+		read -r epoch uptime accepted_epoch accepted_up accepted suppressed failed extra <"$RUN_DIR/event-health"
+		case "$accepted_epoch:$accepted_up:$accepted:$suppressed:$failed" in *[!0-9:]*|:*|*:) accepted_epoch=0; accepted_up=0; accepted=0; suppressed=0; failed=0 ;; esac
+	fi
+	epoch="$(log_epoch)"; uptime="$(log_clock)"
+	case "$1" in
+		written) accepted_epoch="$epoch"; accepted_up="$uptime"; [ "$accepted" -ge 2147483647 ] || accepted=$((accepted + 1)) ;;
+		suppressed) [ "$suppressed" -ge 2147483647 ] || suppressed=$((suppressed + 1)) ;;
+		failed) [ "$failed" -ge 2147483647 ] || failed=$((failed + 1)) ;;
+	esac
+	printf '%s %s %s %s %s %s %s\n' "$epoch" "$uptime" "$accepted_epoch" "$accepted_up" "$accepted" "$suppressed" "$failed" >"$RUN_DIR/event-health.new" &&
+		mv -f "$RUN_DIR/event-health.new" "$RUN_DIR/event-health"
+}
 log_append() {
-	local line size bytes dropped
+	local line size bytes dropped outcome
 	log_redact "${1:-OK}" | while IFS= read -r line; do
-		log_open || exit 1
-		log_flush_locked || true
+		log_open || { log_diag append-open-failed; exit 1; }
+		if ! log_flush_locked; then log_diag flush-failed; fi
 		[ -f "$RUN_DIR/facts" ] || : >"$RUN_DIR/facts"
+		outcome=suppressed
 		if log_new_fact_locked "$line"; then
 			size="$(wc -c <"$RUN_DIR/pending")"; bytes="$(printf '%s\n' "$line" | wc -c)"
 			# Reserve room for a single overflow warning, too.
 			if [ "$((size + bytes))" -le "$((LOG_BUFFER_LIMIT - 1024))" ]; then
-				printf '%s\n' "$line" >>"$RUN_DIR/pending"
+				if ! printf '%s\n' "$line" >>"$RUN_DIR/pending"; then
+					# A failed append must be eligible for retry, not hidden by dedup.
+					rm -f "$RUN_DIR/heartbeat-ok" "$RUN_DIR/facts"
+					log_event_health_locked failed; log_diag append-write-failed
+					log_close; exit 1
+				fi
+				outcome=written
 			else
+				outcome=failed
+				rm -f "$RUN_DIR/heartbeat-ok" "$RUN_DIR/facts"
 				dropped="$(cat "$RUN_DIR/dropped" 2>/dev/null)"; dropped="${dropped:-0}"
 				[ "$dropped" -ge 2147483647 ] || dropped=$((dropped + 1))
 				printf '%s\n' "$dropped" >"$RUN_DIR/dropped"
 				log_warn_locked buffer-warning 'Буфер логов заполнен: новые события сверх лимита пропускаются, неподтверждённый журнал сохранён.'
 			fi
 		fi
+		log_event_health_locked "$outcome" || { log_diag health-write-failed; log_close; exit 1; }
 		log_close
 	done
 }
@@ -542,7 +604,7 @@ log_reset_locked() {
 	log_checkpoint_locked && log_commit_locked || return 1
 	rm -f "$LOG_DIR"/part.* "$LOG_DIR/damaged.log"
 	: >"$RUN_DIR/pending"
-	rm -f "$RUN_DIR/ack" "$RUN_DIR/facts" "$RUN_DIR/heartbeat-ok" "$RUN_DIR/dropped" "$RUN_DIR/buffer-warning" "$RUN_DIR/inflight"
+	rm -f "$RUN_DIR/ack" "$RUN_DIR/facts" "$RUN_DIR/heartbeat-ok" "$RUN_DIR/heartbeat-stored" "$RUN_DIR/dropped" "$RUN_DIR/buffer-warning" "$RUN_DIR/inflight"
 	log_clock >"$RUN_DIR/last-flush"
 }
 log_clear() { log_open || return 1; log_reset_locked; result=$?; log_close; return "$result"; }
@@ -592,10 +654,16 @@ log_ack() {
 	fi
 	log_close
 }
-log_flush() { log_open || return 1; log_flush_locked "${1:-}"; result=$?; log_close; return "$result"; }
+log_flush() {
+	log_open || return 1
+	log_flush_locked "${1:-}"; result=$?
+	[ "$result" = 0 ] || log_diag flush-failed
+	log_close; return "$result"
+}
 log_status() {
 	log_open || return 1
 	printf 'storage=%s\npersistent=%s\nruntime=%s\nlimit_bytes=%s\nmax_parts=%s\nbuffer_limit_bytes=%s\nflush_seconds=%s\njournal_id=%s\ncommitted_bytes=%s\nack_bytes=%s\npending_bytes=%s\n' "$LOG_DIR" "$PERSISTENT" "$RUN_DIR" "$LOG_LIMIT" "$LOG_PART_LIMIT" "$LOG_BUFFER_LIMIT" "$LOG_FLUSH_SECONDS" "$JOURNAL" "$TOTAL" "$ACK" "$(wc -c <"$RUN_DIR/pending")"
+	log_health_status
 	log_close
 }
 log_migrate() {
@@ -687,36 +755,183 @@ log_sync_loop() {
 		sleep 3
 	done
 }
+# Diagnostics contain fixed reason codes only, never a line, URL or credentials.
+# At most 4 KiB plus a 2 KiB compaction file, all on tmpfs. No syslog feedback.
+log_diag() {
+	local code now last previous bytes
+	code="$1"; now="$(log_clock)"; last=0; previous=''
+	[ -d "$RUN_DIR" ] || return 0
+	mkdir "$RUN_DIR/diag-lock" 2>/dev/null || return 0
+	if [ -s "$RUN_DIR/diag-last" ]; then read -r last previous <"$RUN_DIR/diag-last"; fi
+	case "$last" in ''|*[!0-9]*) last=0 ;; esac
+	if [ "$code" != "$previous" ] || [ "$now" -lt "$last" ] || [ "$((now - last))" -ge 60 ]; then
+		bytes=0; [ ! -f "$RUN_DIR/diagnostics" ] || bytes="$(wc -c <"$RUN_DIR/diagnostics")"
+		if [ "$bytes" -gt 3900 ]; then
+			tail -c 2048 "$RUN_DIR/diagnostics" >"$RUN_DIR/diagnostics.new" && mv -f "$RUN_DIR/diagnostics.new" "$RUN_DIR/diagnostics"
+		fi
+		printf '%s %s\n' "$(log_epoch)" "$code" >>"$RUN_DIR/diagnostics"
+		printf '%s %s\n' "$now" "$code" >"$RUN_DIR/diag-last"
+	fi
+	rmdir "$RUN_DIR/diag-lock" 2>/dev/null || true
+}
+log_process_info() {
+	local stat
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	kill -0 "$1" 2>/dev/null || return 1
+	if ! read -r stat <"/proc/$1/stat" 2>/dev/null; then return 1; fi
+	stat="${stat##*) }"
+	set -- $stat
+	[ "$#" -ge 20 ] || return 1
+	case "$1" in Z|X) return 1 ;; esac
+	shift 19
+	printf '%s\n' "$1"
+}
+log_collector_lock() {
+	local owner attempt
+	attempt=0
+	while ! mkdir "$RUN_DIR/collector-lock" 2>/dev/null; do
+		owner="$(cat "$RUN_DIR/collector-lock/pid" 2>/dev/null)"
+		case "$owner" in
+			''|*[!0-9]*) [ "$attempt" -lt 20 ] || log_reap_lock "$RUN_DIR/collector-lock" "$attempt" ;;
+			*)
+				if log_process_info "$owner" >/dev/null; then return 2; fi
+				# Reap a logread orphan only if its PID AND kernel start time match.
+				log_reap_lock "$RUN_DIR/collector-lock" "$attempt" ;;
+		esac
+		log_pause
+		attempt=$((attempt + LOG_PAUSE_TENTHS)); [ "$attempt" -lt 40 ] || { log_diag collector-lock-timeout; return 1; }
+	done
+	log_self_pid >"$RUN_DIR/collector-lock/pid"
+}
+log_collector_progress() {
+	printf '%s %s %s %s %s %s\n' "$collector" "$(log_epoch)" "$(log_clock)" "$received" "$append_errors" "$flush_errors" >"$RUN_DIR/collector-progress.new" &&
+		mv -f "$RUN_DIR/collector-progress.new" "$RUN_DIR/collector-progress"
+}
+log_collector_cleanup() {
+	local code owner attempt
+	code="$1"; trap - EXIT INT TERM
+	exec 3>&-
+	if [ -n "$reader" ]; then
+		kill "$reader" 2>/dev/null || true
+		# Never leave an uninterruptible wait in the procd shutdown path.
+		attempt=0
+		while log_process_info "$reader" >/dev/null && [ "$attempt" -lt 10 ]; do log_pause; attempt=$((attempt + LOG_PAUSE_TENTHS)); done
+		if log_process_info "$reader" >/dev/null; then kill -KILL "$reader" 2>/dev/null || true; fi
+		wait "$reader" 2>/dev/null || true
+	fi
+	rm -f "$fifo"
+	owner="$(cat "$RUN_DIR/collector-lock/pid" 2>/dev/null)"
+	if [ "$owner" = "$collector" ]; then
+		# Flush while still owning the collector lock. The successor never overlaps.
+		(log_flush force) || true
+		rm -f "$RUN_DIR/collector-lock/reader" "$RUN_DIR/collector-lock/pid"
+		rmdir "$RUN_DIR/collector-lock" 2>/dev/null || true
+	fi
+	exit "$code"
+}
+log_health_status() {
+	local owner reader birth now state last_input input_up last_event event_up accepted suppressed failed extra flush_epoch flush_up received errors flush_errors progress_owner
+	owner=''; reader=''; birth=''; last_input=0; input_up=0; last_event=0; event_up=0; accepted=0; suppressed=0; failed=0; flush_epoch=0; flush_up=0; received=0; errors=0; flush_errors=0
+	[ ! -s "$RUN_DIR/collector-lock/pid" ] || read -r owner <"$RUN_DIR/collector-lock/pid"
+	[ ! -s "$RUN_DIR/collector-lock/reader" ] || read -r reader birth <"$RUN_DIR/collector-lock/reader"
+	[ ! -s "$RUN_DIR/event-health" ] || read -r last_input input_up last_event event_up accepted suppressed failed extra <"$RUN_DIR/event-health"
+	[ ! -s "$RUN_DIR/flush-health" ] || read -r flush_epoch flush_up <"$RUN_DIR/flush-health"
+	if [ -s "$RUN_DIR/collector-progress" ]; then
+		read -r progress_owner extra extra received errors flush_errors <"$RUN_DIR/collector-progress"
+	fi
+	now="$(log_clock)"; state=stopped
+	if log_process_info "$owner" >/dev/null; then
+		state=starting
+		if [ -n "$birth" ] && [ "$(log_process_info "$reader")" = "$birth" ]; then
+			state=waiting-for-events
+			if [ -s "$RUN_DIR/collector-progress" ]; then
+				read -r progress_owner extra extra received errors flush_errors <"$RUN_DIR/collector-progress"
+				if [ "$progress_owner" = "$owner" ] && [ "$received" -gt 0 ]; then
+					state=idle-unverified
+					[ "$input_up" -gt 0 ] && [ "$now" -ge "$input_up" ] && [ "$((now - input_up))" -le 120 ] && state=receiving
+				fi
+			fi
+		else state=reader-stopped; fi
+	fi
+	printf 'collector_state=%s\ncollector_pid=%s\nreader_pid=%s\nreceived_lines=%s\nlast_input_epoch=%s\nlast_event_epoch=%s\naccepted_events=%s\nsuppressed_events=%s\nappend_errors=%s\nflush_errors=%s\nlast_flush_epoch=%s\nheartbeat_sample_seconds=%s\n' "$state" "$owner" "$reader" "$received" "$last_input" "$last_event" "$accepted" "$suppressed" "$errors" "$flush_errors" "$flush_epoch" "$LOG_HEARTBEAT_SECONDS"
+	if [ "$input_up" -gt 0 ] && [ "$now" -ge "$input_up" ]; then printf 'last_input_age_seconds=%s\n' "$((now - input_up))"; fi
+	if [ "$event_up" -gt 0 ] && [ "$now" -ge "$event_up" ]; then printf 'last_event_age_seconds=%s\n' "$((now - event_up))"; fi
+	printf 'rejected_events=%s\nlast_commit_epoch=%s\n' "$failed" "$(cat "$RUN_DIR/commit-health" 2>/dev/null || printf 0)"
+	printf 'runtime_bytes=%s\n' "$(du -sk "$RUN_DIR" 2>/dev/null | awk '{print $1 * 1024}')"
+	for extra in "$owner" "$reader"; do
+		case "$extra" in ''|*[!0-9]*) continue ;; esac
+		if [ -r "/proc/$extra/status" ]; then
+			awk -v pid="$extra" '/^VmRSS:/ {print "process_" pid "_rss_kib=" $2}' "/proc/$extra/status"
+		fi
+	done
+}
+log_collect_line() {
+	# Explicit stdin is essential: awk/redaction must never inherit the live FIFO
+	# and drain subsequent syslog records behind the collector's read loop.
+	printf '%s\n' "$1" | log_append
+}
 log_collect() {
-	local owner
+	# Lifecycle variables belong to this collect process: the EXIT trap runs after
+	# this function returns, when function-local variables have gone out of scope.
 	log_open || return 1
 	log_close
-	if ! mkdir "$RUN_DIR/collector-lock" 2>/dev/null; then
-		owner="$(cat "$RUN_DIR/collector-lock/pid" 2>/dev/null)"
-		case "$owner" in ''|*[!0-9]*) ;; *) kill -0 "$owner" 2>/dev/null && return 0 ;; esac
-		rm -f "$RUN_DIR/collector-lock/pid"; rmdir "$RUN_DIR/collector-lock" 2>/dev/null || return 1
-		mkdir "$RUN_DIR/collector-lock" || return 1
-	fi
-	log_self_pid >"$RUN_DIR/collector-lock/pid"
-	rm -f "$RUN_DIR"/stream.*
-	fifo="$RUN_DIR/stream.$$"; reader=''; writer=''; timer=''
-	trap 'trap - EXIT; for child in "$reader" "$writer" "$timer"; do [ -z "$child" ] || kill "$child" 2>/dev/null || true; done; wait; rm -f "$fifo" "$RUN_DIR/collector-lock/pid"; rmdir "$RUN_DIR/collector-lock" 2>/dev/null || true; (log_flush force) || true' EXIT
+	reader=''; birth=''
+	log_collector_lock; rc=$?
+	[ "$rc" != 2 ] || return 0
+	[ "$rc" = 0 ] || return 1
+	collector="$(cat "$RUN_DIR/collector-lock/pid")"
+	fifo="$RUN_DIR/stream.$collector"
+	received=0; append_errors=0; flush_errors=0; last_tick=0; fragment=''
+	trap 'log_collector_cleanup "$?"' EXIT
 	trap 'exit 0' INT TERM
-	mkfifo "$fifo" || return 1
-	logread -f -e 'owrt-remote\(\[[0-9][0-9]*\]\)\{0,1\}:' >"$fifo" 2>/dev/null & reader=$!
-	while IFS= read -r line; do printf '%s\n' "$line" | log_append; done <"$fifo" & writer=$!
+	# Only the owner may remove stale runtime FIFOs. Persistent chunks are untouched.
+	rm -f "$RUN_DIR"/stream.*
+	rmdir "$RUN_DIR/diag-lock" 2>/dev/null || true
+	mkfifo "$fifo" || { log_diag fifo-create-failed; return 1; }
+	# A single parent reads and appends. No background writer can silently die or
+	# consume signals while procd still observes a live supervising shell.
+	exec 3<>"$fifo" || { log_diag fifo-open-failed; return 1; }
+	logread -f -l 64 -e 'owrt-remote\(\[[0-9][0-9]*\]\)\{0,1\}:' 3>&- >"$fifo" 2>/dev/null & reader=$!
+	birth="$(log_process_info "$reader")"
+	printf '%s %s\n' "$reader" "$birth" >"$RUN_DIR/collector-lock/reader"
+	log_collector_progress || return 1
 	while :; do
-		# Lock-operation traps must not replace the collector's child/FIFO cleanup.
-		(log_flush) || true
-		sleep 5 & timer=$!
-		wait "$timer" || return 0
-		kill -0 "$reader" 2>/dev/null && kill -0 "$writer" 2>/dev/null || return 1
+		line=''; rc=0
+		# BusyBox ash supports timed, bounded reads. The FIFO itself stays on tmpfs.
+		IFS= read -r -t 5 -n 4096 line <&3 || rc=$?
+		if [ "$rc" = 0 ] || [ -n "$line" ]; then
+			# A logd line is <= its fixed line buffer. Drop an oversized fragment
+			# instead of growing an unbounded shell string on malformed input.
+			if [ "$rc" != 0 ] || [ "${#line}" -ge 4096 ]; then
+				fragment=1; log_diag fragmented-input
+			elif [ -n "$fragment" ]; then
+				fragment=''
+			else
+				received=$((received + 1))
+				log_collector_progress || return 1
+				if ! (log_collect_line "$line"); then
+					append_errors=$((append_errors + 1)); log_collector_progress || true
+					log_diag collector-append-failed
+					# Do not pretend to be healthy after an unhandled write failure.
+					return 1
+				fi
+			fi
+		fi
+		now="$(log_clock)"
+		if [ "$now" -lt "$last_tick" ] || [ "$((now - last_tick))" -ge 5 ]; then
+			last_tick="$now"
+			if ! (log_flush); then flush_errors=$((flush_errors + 1)); log_diag collector-flush-failed; fi
+			log_collector_progress || return 1
+		fi
+		if ! log_process_info "$reader" >/dev/null; then log_diag reader-exited; return 1; fi
+		# A timeout with no input is normal idle, not a failure or proof of health.
 	done
 }
 
 case "${1:-}" in
 	check) log_open && log_close ;;
 	status) log_status ;;
+	diagnostics) log_init && { [ ! -f "$RUN_DIR/diagnostics" ] || cat "$RUN_DIR/diagnostics"; } ;;
 	migrate) log_migrate ;;
 	flush) log_flush "${2:-}" ;;
 	collect) log_collect ;;
@@ -729,5 +944,5 @@ case "${1:-}" in
 	event)
 		case "${3:-ok}" in bad|error) level=ERROR ;; warn) level=WARN ;; *) level=OK ;; esac
 		{ printf '%s owrt-remote: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$2"; cat; } | log_append "$level" ;;
-	*) printf 'Usage: logs.sh collect|read [live]|clear|append|event MESSAGE|status|flush [force]\n' >&2; exit 2 ;;
+	*) printf 'Usage: logs.sh collect|read [live]|clear|append|event MESSAGE|status|diagnostics|flush [force]\n' >&2; exit 2 ;;
 esac
