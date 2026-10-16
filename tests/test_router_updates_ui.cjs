@@ -65,6 +65,7 @@ const server = http.createServer((req,res)=>{
       assert.equal(await page.locator('.router small').textContent(),'ID: node-5');
       assert.equal(await page.locator('#countTotal').textContent(),'1');
       assert.equal(await page.locator('#countSuccess').textContent(),'0');
+      assert.equal(await page.locator('#queueOutcomePanel').isVisible(),false);
       assert.equal(await page.locator('.live-badge').textContent(),'● Онлайн');
       assert.equal(await page.locator('#command').inputValue(),'wget -O - "'+defaultRepo+'/install.sh?v=$(date +%s)" | sh');
       const command=mobile?'https://another.example/updates/router.sh?v=2&from=hub':'wget -O - "https://repo.example/install.sh?v=$(date +%s)" | sh';
@@ -108,17 +109,69 @@ const server = http.createServer((req,res)=>{
       assert.equal(await page.locator('#queueProgress').getAttribute('aria-valuenow'),'100');
       await page.locator('#command').fill(command);
       assert.equal(starts.length,count);
-      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth&&innerWidth===visualViewport.width),true);
       assert.equal(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage}).includes('test-password')),false);
       await page.screenshot({path:path.join(root,mobile?'mobile.png':'desktop.png'),fullPage:true});
       // Match the user's example exactly, including all finished outcomes.
-      job.items=Array.from({length:35},(_,i)=>({id:'node-'+(i+1),name:'Роутер '+(i+1),state:i<21?'success':i<25?'error':i<26?'unknown':i<27?'cancelled':'skipped',message:'Итог установки'}));
+      job.items=Array.from({length:35},(_,i)=>({id:'node-'+(i+1),name:i===21?'АНТОН ВПН':'Роутер '+(i+1),state:i<21?'success':i<25?'error':i<26?'unknown':i<27?'cancelled':'skipped',message:i===21?'Общий SSH-пароль не принят. Команда обновления не запускалась.':i===25?'SSH недоступен: результат и остановка не подтверждены.':'Итог установки: причина '+(i+1),output:i===21?'Permission denied\n'+Array.from({length:50},(_,i)=>'Диагностика '+i).join('\n'):''}));
       await page.waitForFunction(()=>document.getElementById('countTotal').textContent==='35');
       for(const [key,value] of Object.entries({Success:21,Error:4,Unknown:1,Cancelled:1,Skipped:8,Total:35,Active:0,Queued:0})) {
         assert.equal(await page.locator('#count'+key).textContent(),String(value));
       }
       assert.equal(await page.locator('#queueProgress').getAttribute('aria-valuenow'),'100');
+      assert.equal(await page.locator('#queueOutcomePanel').isVisible(),true);
+      assert.equal(await page.locator('#outcomeTitle').textContent(),'Проблемы обновления · 14');
+      assert.equal(await page.locator('#outcomeList article').count(),14);
+      assert.equal(await page.locator('#outcomeList strong').first().textContent(),'АНТОН ВПН');
+      assert.equal(await page.locator('#outcomeList small').first().textContent(),'ID: node-22');
+      assert.match(await page.locator('#outcomeList .outcome-reason').first().textContent(),/Общий SSH-пароль не принят/);
+      assert.equal(await page.locator('#outcomeList article[data-router="node-1"]').count(),0);
+      const outcomeButton=state=>page.locator('.outcome-toggle[data-state="'+state+'"]');
+      await outcomeButton('error').click();
+      assert.equal(await page.locator('#outcomeTitle').textContent(),'Ошибки · 4');
+      assert.equal(await page.locator('#outcomeList article').count(),4);
+      assert.equal(await outcomeButton('error').getAttribute('aria-pressed'),'true');
+      assert.equal(await outcomeButton('unknown').getAttribute('aria-pressed'),'false');
+      assert.equal(await page.locator('#showAllOutcomes').isVisible(),true);
+      const errorRow=page.locator('#outcomeList article[data-router="node-22"]');
+      await errorRow.locator('summary').click();
+      await errorRow.locator('pre').evaluate(node=>{node.scrollTop=72;});
+      await page.locator('#outcomeList').evaluate(node=>{node.scrollTop=55;});
+      const savedScroll=await page.locator('#outcomeList').evaluate(node=>node.scrollTop);
+      const pollCount=polls;
+      job.items[21].output+='\nНовая строка';job.items[21].message+=' Ответ SSH сохранён.';
+      await page.waitForFunction(()=>document.querySelector('#outcomeList pre').textContent.includes('Новая строка'));
+      assert.ok(polls>pollCount);
+      assert.equal(await outcomeButton('error').getAttribute('aria-pressed'),'true');
+      assert.equal(await errorRow.locator('details').evaluate(node=>node.open),true);
+      assert.equal(await errorRow.locator('pre').evaluate(node=>node.scrollTop),72);
+      assert.equal(await page.locator('#outcomeList').evaluate(node=>node.scrollTop),savedScroll);
+      for(const [state,title,total] of [['unknown','Не подтверждено',1],['cancelled','Остановлено',1],['skipped','Пропущено',8]]) {
+        await outcomeButton(state).click();
+        assert.equal(await page.locator('#outcomeTitle').textContent(),title+' · '+total);
+        assert.equal(await page.locator('#outcomeList article').count(),total);
+      }
+      await page.locator('#showAllOutcomes').click();
+      assert.equal(await page.locator('#outcomeList article').count(),14);
+      assert.equal(await page.locator('#showAllOutcomes').isVisible(),false);
+      assert.equal(starts.length,count,'Viewing outcome details must never execute an update');
+      await page.evaluate(()=>document.querySelector('.queue-dashboard').scrollIntoView());
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
       await page.locator('.queue-dashboard').screenshot({path:path.join(root,mobile?'mobile-summary.png':'desktop-summary.png')});
+      // Reproduce 5 errors and zero entries in the other result categories.
+      job.items=job.items.slice(0,5).map((item,i)=>({...item,state:'error',name:i===0?'<img src=x onerror="window.outcomeInjected=true">':item.name,message:'Ошибка SSH <script>window.outcomeInjected=true</script>'}));
+      await page.waitForFunction(()=>document.getElementById('countError').textContent==='5');
+      assert.equal(await page.locator('#outcomeList article').count(),5);
+      assert.equal(await page.evaluate(()=>window.outcomeInjected===true),false);
+      assert.equal(await page.locator('#outcomeList img,#outcomeList script').count(),0);
+      for(const state of ['unknown','cancelled','skipped']) {
+        await outcomeButton(state).click();
+        assert.equal(await page.locator('#outcomeList article').count(),0);
+        assert.equal(await page.locator('#outcomeList .outcome-empty').textContent(),'Роутеров в этой категории нет.');
+      }
+      // A different queue resets the previous category instead of hiding failures.
+      job={...job,id:'next-task'};
+      await page.waitForFunction(()=>document.getElementById('outcomeTitle').textContent==='Проблемы обновления · 5');
       routers=[{id:'node-5',name:'АНТОН ВПН',online:true,last_seen:Math.floor(Date.now()/1000),xray:'running'},{id:'node-36',name:'Новый роутер',online:false,last_seen:0,xray:'unknown'}];
       await page.locator('#refreshRouters').click();
       await page.waitForFunction(()=>document.getElementById('status').textContent.includes('Можно запустить новую очередь'));
@@ -128,6 +181,8 @@ const server = http.createServer((req,res)=>{
       assert.equal(await page.locator('.router strong').first().textContent(),'АНТОН ВПН');
       assert.equal(await page.locator('#countTotal').textContent(),'2');
       assert.equal(await page.locator('#countSuccess').textContent(),'0');
+      assert.equal(await page.locator('#queueOutcomePanel').isVisible(),false);
+      assert.equal(await page.locator('#outcomeList article').count(),0);
       assert.equal(await page.locator('#start').isEnabled(),true);
       assert.equal(await page.locator('#command').inputValue(),command);
       await page.reload();
@@ -137,6 +192,29 @@ const server = http.createServer((req,res)=>{
       assert.deepEqual(errors,[]);
       await page.close();
     }
+    // Long content must wrap without widening the mobile layout viewport.
+    const longName='Советская_30_Удалённый_роутер_'.repeat(8),longId='node-'+ 'x'.repeat(95);
+    for(const viewport of [{width:320,height:740},{width:360,height:800},{width:390,height:844},{width:430,height:932},{width:844,height:390}]) {
+      const page=await browser.newPage({viewport,isMobile:true,hasTouch:true,deviceScaleFactor:2});
+      const errors=[];page.on('pageerror',error=>errors.push(error.message));
+      routers=[{id:longId,name:longName,online:true,last_seen:Math.floor(Date.now()/1000),xray:'running'}];
+      job={id:'mobile-wrap',state:'finished',cancel_requested:false,items:[{id:longId,name:longName,state:'error',message:'Не удалось скачать https://updates.example/'+ 'abcdef'.repeat(100)+' — SSH не ответил.',output:'diagnostic='+ '0123456789'.repeat(150)}]};
+      await page.goto(`http://127.0.0.1:${server.address().port}/router-updates/`);
+      await page.waitForFunction(()=>document.getElementById('countError').textContent==='1');
+      await page.locator('#command').fill('wget -O - "https://updates.example/'+ 'longpath'.repeat(100)+'" | sh');
+      await page.locator('#sshPassword').fill('password');await page.locator('#sshPassword').focus();
+      await page.locator('#outcomeList summary').click();
+      await page.locator('#results summary').click();
+      const layout=await page.evaluate(()=>({width:innerWidth,visual:visualViewport.width,scroll:document.documentElement.scrollWidth,fields:['command','sshPassword'].map(id=>parseFloat(getComputedStyle(document.getElementById(id)).fontSize)),buttons:[...document.querySelectorAll('.head-actions button,.head-actions .btn,.actions button')].map(node=>({height:node.getBoundingClientRect().height,width:node.getBoundingClientRect().width})),panels:[...document.querySelectorAll('.panel')].map(node=>node.getBoundingClientRect().width),overflow:[...document.querySelectorAll('.head,.head-actions,.actions,.note,textarea,input,.queue-heading,.metric,.router,.outcome-router,pre')].filter(node=>{const rect=node.getBoundingClientRect();return rect.width&& (rect.left<0||rect.right>innerWidth+1);}).map(node=>node.id||node.className)}));
+      assert.equal(layout.width,viewport.width,JSON.stringify(layout));
+      assert.ok(layout.scroll<=viewport.width,JSON.stringify(layout));
+      assert.ok(Math.abs(layout.visual-viewport.width)<1,JSON.stringify(layout));
+      assert.deepEqual(layout.overflow,[]);
+      if(viewport.width<=680){assert.ok(layout.fields.every(size=>size>=16));assert.ok(layout.buttons.every(button=>button.height>=44));assert.equal(layout.buttons[0].width,layout.buttons[1].width);}
+      await page.screenshot({path:path.join(root,'mobile-layout-'+viewport.width+'.png'),fullPage:true});
+      assert.deepEqual(errors,[]);await page.close();
+    }
+    job=null;routers=[];
     const dashboard=await browser.newPage();
     await dashboard.goto(`http://127.0.0.1:${server.address().port}/`);
     const link=dashboard.locator('#routerUpdatesGroup a');
@@ -144,6 +222,6 @@ const server = http.createServer((req,res)=>{
     assert.equal(await link.getAttribute('href'),'/router-updates/');
     assert.match(await link.getAttribute('rel'),/noopener/);
     await dashboard.close();
-    console.log('Router updates desktop/mobile dashboard, live statuses, refresh, polling, reload, privacy and new-tab link: PASS');
+    console.log('Router updates desktop/mobile dashboard, outcome lists, 320/360/390/430px and landscape layouts, live statuses, refresh, polling, reload, privacy and new-tab link: PASS');
   } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

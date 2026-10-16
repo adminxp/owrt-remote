@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-control-v117
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-mobile-v117
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 
@@ -70,6 +70,9 @@ required = (
     "OWRT_UPDATE_OUTPUT_TEXT=",
     "refreshRouters",
     "queue-dashboard",
+    "queueOutcomePanel",
+    "function renderOutcomes(){",
+    "grid-template-columns:minmax(0,1fr)",
     "def clear_finished(self, job_id):",
     "\u041e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c \u0432\u0441\u0451",
     "routerUpdatesGroup",
