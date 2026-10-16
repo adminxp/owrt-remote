@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -20,7 +21,7 @@ class RouterUpdatesDeployTests(unittest.TestCase):
         self.target = self.root / 'hub.py'
         self.previous = b'print("previous Hub")\n'
         self.target.write_bytes(self.previous)
-        self.backup = self.root / 'hub.py.bak-before-router-updates-v117'
+        self.backup = self.root / 'hub.py.bak-before-router-updates-control-v117'
         source = (ROOT / 'vps/deploy-router-updates.ps1').read_text(encoding='utf-8')
         self.script = source.split("$RemoteScript = @'\n", 1)[1].split("\n'@", 1)[0]
         self.script = self.script.replace('/opt/owrt-remote/owrt-remote-hub.py', self.target.as_posix())
@@ -75,6 +76,38 @@ sleep() { return 0; }
         self.assertFalse(self.backup.exists())
         self.assertNotEqual(self.deploy('Rollback').returncode, 0)
         self.assertEqual(self.target.read_bytes(), self.previous)
+
+    @unittest.skipUnless(os.name == 'nt' and shutil.which('powershell.exe'),
+                         'Windows PowerShell required')
+    def test_windows_powershell_preserves_remote_validation(self):
+        deploy = ROOT / 'vps/deploy-router-updates.ps1'
+        # Without a BOM, Windows PowerShell 5.1 decodes source using the ANSI
+        # code page. Keep the deployment source ASCII and test the actual
+        # PowerShell-to-UTF-8 staging boundary, not just the extracted heredoc.
+        self.assertTrue(deploy.read_bytes().isascii())
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+             '-File', str(deploy), '-Vps', 'unused-local-test', '-PrepareOnly'],
+            capture_output=True, encoding='utf-8', errors='replace', timeout=25,
+            env={**os.environ, 'TEMP': str(self.root), 'TMP': str(self.root)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prepared = next(line.removeprefix('Prepared only: ').strip()
+                        for line in result.stdout.splitlines()
+                        if line.startswith('Prepared only: '))
+        stage = Path(prepared)
+        self.assertEqual(stage.resolve().parent, self.root.resolve())
+        self.assertTrue(stage.name.startswith('owrt-router-updates-'))
+        remote = stage.joinpath('run.sh').read_bytes()
+        self.assertTrue(remote.isascii())
+        self.assertNotIn(b'\r', remote)
+        expected_hub = (ROOT / 'vps/owrt-remote-hub.py').read_bytes().replace(b'\r\n', b'\n')
+        self.assertEqual(stage.joinpath('hub.py').read_bytes(), expected_hub)
+        validation = remote.decode('ascii').split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        checked = subprocess.run([sys.executable, '-', str(stage / 'hub.py')],
+                                 input=validation, encoding='utf-8',
+                                 capture_output=True, timeout=10)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn('Candidate validation OK', checked.stdout)
 
 
 if __name__ == '__main__':

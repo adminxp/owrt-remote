@@ -35,6 +35,10 @@ class UpdatesTests(unittest.TestCase):
         self.manager = self.app.router_updates
         self.manager.POLL_SECONDS = .001
         self.manager.ROUTER_TIMEOUT = .02
+        self.manager.CONNECTION_TIMEOUT = .015
+        self.manager.LAUNCH_TIMEOUT = .01
+        self.manager.SILENCE_TIMEOUT = .015
+        self.manager.STOP_TIMEOUT = .01
         hub.save_auth_state({'username': 'owner', 'password': hub.password_digest('hub-password')})
         hub.save_sessions([])
         with self.app.conn() as conn:
@@ -57,7 +61,7 @@ class UpdatesTests(unittest.TestCase):
             calls.append((row['id'], script, password))
             if 'exec setsid /bin/sh' in script:
                 return 'OWRT_UPDATE_STARTED=1\nOWRT_UPDATE_NAME=' + b64('Советская 30' if row['id'] == 'main' else 'node-2')
-            if 'OWRT_UPDATE_OUTPUT=' in script:
+            if 'OWRT_UPDATE_OUTPUT_TEXT=' in script:
                 return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=' + ('0' if row['id'] == 'main' else '5') + '\nOWRT_UPDATE_OUTPUT=' + b64('ssh-secret\nhub_token=hidden\nCompleted')
             return ''
         with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
@@ -86,7 +90,7 @@ class UpdatesTests(unittest.TestCase):
         self.assertEqual(launches, ['main', 'node-2'])
         self.assertTrue(all(x['state'] == 'success' for x in job['items']))
 
-    def test_unknown_result_stops_queue_without_false_success_or_overlap(self):
+    def test_disconnected_router_does_not_block_remaining_queue_or_claim_success(self):
         launches = []
         def ssh(row, script, password):
             if 'OWRT_UPDATE_READY=1' in script: return 'OWRT_UPDATE_READY=1\n'
@@ -97,17 +101,20 @@ class UpdatesTests(unittest.TestCase):
         with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
             self.manager.start('echo install', '', 'request-1234567892')
             job = self.finish()
-        self.assertEqual(launches, ['main'])
-        self.assertEqual([x['state'] for x in job['items']], ['unknown', 'skipped'])
+        self.assertEqual(launches, ['main', 'node-2'])
+        self.assertEqual([x['state'] for x in job['items']], ['unknown', 'unknown'])
+        self.assertIn('SSH не отвечает', job['items'][0]['message'])
+        self.assertIn('temporary disconnect', job['items'][0]['message'])
 
-    def test_duplicate_click_and_cancel_dont_launch_again_or_interrupt_current(self):
+    def test_duplicate_click_and_cancel_stop_current_without_launching_next(self):
         entered, release = threading.Event(), threading.Event()
         def ssh(row, script, password):
             if 'OWRT_UPDATE_READY=1' in script: return 'OWRT_UPDATE_READY=1\n'
             if 'exec setsid /bin/sh' in script:
                 entered.set(); release.wait(2)
                 return 'OWRT_UPDATE_STARTED=1\n'
-            return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=0\n'
+            if 'OWRT_UPDATE_CANCEL=1' in script: return 'OWRT_UPDATE_CANCEL=1\n'
+            return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=130\nOWRT_UPDATE_REASON=cancelled\n'
         with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
             task = self.manager.start('echo install', '', 'request-1234567893')
             self.assertTrue(entered.wait(2))
@@ -115,9 +122,94 @@ class UpdatesTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.manager.start('echo install', '', 'request-1234567894')
             self.manager.cancel(task)
+            self.assertEqual(self.manager.snapshot()['items'][1]['state'], 'skipped')
             release.set()
             job = self.finish()
-        self.assertEqual([x['state'] for x in job['items']], ['success', 'skipped'])
+        self.assertEqual([x['state'] for x in job['items']], ['cancelled', 'skipped'])
+
+    def test_silent_and_dead_installers_explain_failure_and_continue(self):
+        self.manager.CONNECTION_TIMEOUT = .2
+        for first_state in ['running', 'dead']:
+            with self.subTest(first_state=first_state):
+                cancelled = []
+                def ssh(row, script, password):
+                    if 'OWRT_UPDATE_READY=1' in script: return 'OWRT_UPDATE_READY=1\n'
+                    if 'exec setsid /bin/sh' in script: return 'OWRT_UPDATE_STARTED=1\n'
+                    if 'OWRT_UPDATE_CANCEL=1' in script:
+                        cancelled.append(row['id'])
+                        return 'OWRT_UPDATE_CANCEL=1\n'
+                    if row['id'] == 'node-2': return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=0\n'
+                    if cancelled: return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=130\nOWRT_UPDATE_REASON=cancelled\n'
+                    return 'OWRT_UPDATE_STATE=' + first_state + '\n'
+                with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+                    self.manager.start('echo install', '', 'request-silence-' + first_state)
+                    job = self.finish()
+                self.assertEqual([x['state'] for x in job['items']], ['error', 'success'])
+                self.assertIn('Нет нового вывода' if first_state == 'running' else 'без итогового кода', job['items'][0]['message'])
+
+    def test_normalizes_any_http_script_url_without_changing_full_commands(self):
+        full = 'wget -O - "https://repo.example/install.sh?v=$(date +%s)" | sh'
+        self.assertEqual(hub.normalize_router_update_command(full), full)
+        for url in ['https://repo.example/a.sh', 'https://mirror.example/install.sh?q=one&v=2',
+                    "http://192.0.2.1:8080/a';touch${IFS}/tmp/sentinel;#.sh"]:
+            command = hub.normalize_router_update_command(url)
+            self.assertIn('download.sh', command)
+            self.assertIn(hub.shlex.quote(url), command)
+            self.assertIn('/bin/sh "$file"', command)
+        with self.assertRaises(ValueError):
+            hub.normalize_router_update_command('https://repo.example/path with space')
+
+    def test_transport_timeout_kills_reaps_and_removes_askpass(self):
+        askpass = Path(self.temp.name) / 'askpass'
+        askpass.mkdir()
+        (askpass/'askpass.sh').write_text('fake')
+        process = mock.Mock()
+        process.communicate.side_effect = [subprocess.TimeoutExpired('ssh', 10), ('', '')]
+        process.poll.return_value = None
+        with mock.patch.object(hub.Handler, 'prepare_ssh_askpass', return_value=askpass), \
+                mock.patch.object(hub.subprocess, 'Popen', return_value=process):
+            with self.assertRaisesRegex(RuntimeError, 'нет ответа за 10 секунд'):
+                self.manager._ssh({'ssh_entry_port': 19080}, 'echo ready', 'secret')
+        process.kill.assert_called_once()
+        self.assertEqual(process.communicate.call_count, 2)
+        self.assertIsNone(self.manager.transport)
+        self.assertFalse(askpass.exists())
+
+    def test_stop_interrupts_inflight_ssh_preflight_before_any_installation(self):
+        entered, killed = threading.Event(), threading.Event()
+        process = mock.Mock()
+        process.returncode = -9
+        process.poll.side_effect = lambda: -9 if killed.is_set() else None
+        process.kill.side_effect = killed.set
+        def communicate(*args, **kwargs):
+            entered.set()
+            killed.wait(2)
+            return '', 'SSH connection closed'
+        process.communicate.side_effect = communicate
+        with mock.patch.object(hub.subprocess, 'Popen', return_value=process) as spawn:
+            task = self.manager.start('echo install', '', 'request-cancel-transport')
+            self.assertTrue(entered.wait(2))
+            self.manager.cancel(task)
+            job = self.finish()
+        self.assertTrue(killed.is_set())
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual([x['state'] for x in job['items']], ['cancelled', 'skipped'])
+
+    def test_missing_launch_and_router_side_timeout_do_not_hang_queue(self):
+        for first_state in ['missing', 'timeout']:
+            with self.subTest(first_state=first_state):
+                def ssh(row, script, password):
+                    if 'OWRT_UPDATE_READY=1' in script: return 'OWRT_UPDATE_READY=1\n'
+                    if 'exec setsid /bin/sh' in script: return '' if first_state == 'missing' else 'OWRT_UPDATE_STARTED=1\n'
+                    if 'OWRT_UPDATE_CANCEL=1' in script: return 'OWRT_UPDATE_CANCEL=1\n'
+                    if row['id'] == 'node-2': return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=0\n'
+                    if first_state == 'missing': return 'OWRT_UPDATE_STATE=missing\n'
+                    return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_REASON=timeout\nOWRT_UPDATE_RC=124\n'
+                with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+                    self.manager.start('echo install', '', 'request-result-' + first_state)
+                    job = self.finish()
+                self.assertNotEqual(job['items'][0]['state'], 'success')
+                self.assertEqual(job['items'][1]['state'], 'success')
 
     def test_missing_tunnel_and_invalid_input(self):
         with self.app.conn() as conn:
@@ -179,6 +271,112 @@ class UpdatesTests(unittest.TestCase):
         self.assertIn('строка с ключом или паролем скрыта', safe)
         self.assertIn('Connection closed', safe)
 
+    def test_missing_router_tool_is_a_confirmed_preflight_failure_and_next_runs(self):
+        launches = []
+        def ssh(row, script, password):
+            if 'OWRT_UPDATE_READY=1' in script:
+                name = 'АНТОН ВПН' if row['id'] == 'main' else 'Второй роутер'
+                response = 'OWRT_UPDATE_NAME_TEXT=' + name + '\n'
+                if row['id'] == 'main':
+                    return response + ('OWRT_UPDATE_STATE=not_started\nOWRT_UPDATE_ERROR='
+                                       'На роутере отсутствует утилита setsid. Команда обновления не запускалась.\n')
+                return response + 'OWRT_UPDATE_READY=1\n'
+            if 'exec setsid /bin/sh' in script:
+                launches.append(row['id'])
+                return 'OWRT_UPDATE_STARTED=1\n'
+            return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=0\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            self.manager.start('echo install', '', 'request-tools-missing')
+            job = self.finish()
+        self.assertEqual(launches, ['node-2'])
+        self.assertEqual([item['state'] for item in job['items']], ['error', 'success'])
+        self.assertEqual(job['items'][0]['name'], 'АНТОН ВПН')
+        self.assertIn('setsid', job['items'][0]['message'])
+        self.assertIn('не запускалась', job['items'][0]['message'])
+        self.assertNotIn('не подтвержден', job['items'][0]['message'].lower())
+
+    def test_staging_failure_does_not_poll_or_claim_uncertain_execution(self):
+        calls = []
+        def ssh(row, script, password):
+            calls.append(script)
+            if 'OWRT_UPDATE_READY=1' in script:
+                return 'OWRT_UPDATE_READY=1\nOWRT_UPDATE_NAME_TEXT=АНТОН ВПН\n'
+            if 'exec setsid /bin/sh' in script:
+                return ('OWRT_UPDATE_STATE=not_started\nOWRT_UPDATE_ERROR='
+                        'Подготовка задачи на роутере завершилась ошибкой, rc=1. Команда обновления не запускалась.\n')
+            self.fail('A known prelaunch failure must not be polled or cancelled')
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            self.manager.start('echo install', '', 'request-stage-failure')
+            job = self.finish()
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(item['state'] == 'error' for item in job['items']))
+
+    def test_banner_timeout_explains_stage_without_claiming_a_wrong_password(self):
+        launches = []
+        def ssh(row, script, password):
+            if row['id'] == 'main':
+                raise RuntimeError('Connection timed out during banner exchange\nConnection to 127.0.0.1 port 19080 timed out')
+            if 'OWRT_UPDATE_READY=1' in script: return 'OWRT_UPDATE_READY=1\n'
+            if 'exec setsid /bin/sh' in script:
+                launches.append(row['id'])
+                return 'OWRT_UPDATE_STARTED=1\n'
+            return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=0\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            self.manager.start('echo install', 'secret', 'request-banner-timeout')
+            job = self.finish()
+        self.assertEqual(launches, ['node-2'])
+        self.assertEqual([item['state'] for item in job['items']], ['error', 'success'])
+        message = job['items'][0]['message']
+        self.assertIn('SSH не прислал приветствие', message)
+        self.assertIn('До проверки пароля дело не дошло', message)
+        self.assertIn('Connection timed out during banner exchange', message)
+        self.assertIn('Команда обновления не запускалась', message)
+
+    def test_plain_text_protocol_does_not_parse_installer_output_as_metadata(self):
+        output = 'строка\nOWRT_UPDATE_RC=0\nOWRT_UPDATE_STATE=done\n'
+        fields = hub.router_update_fields('OWRT_UPDATE_STATE=running\nOWRT_UPDATE_OUTPUT_TEXT=\n' + output)
+        self.assertEqual(fields['STATE'], 'running')
+        self.assertNotIn('RC', fields)
+        self.assertEqual(fields['OUTPUT'], output)
+        fields = hub.router_update_fields('OWRT_UPDATE_NAME_TEXT=АНТОН ВПН\nOWRT_UPDATE_READY=1\n')
+        self.assertEqual(fields['NAME'], 'АНТОН ВПН')
+
+    def test_preflight_reads_uci_name_even_if_launch_fails(self):
+        def ssh(row, script, password):
+            if 'OWRT_UPDATE_READY=1' in script:
+                return 'OWRT_UPDATE_NAME_TEXT=АНТОН ВПН\nOWRT_UPDATE_READY=1\n'
+            return 'OWRT_UPDATE_STATE=not_started\nOWRT_UPDATE_ERROR=Недостаточно места; команда не запускалась\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            self.manager.start('echo install', '', 'request-uci-name-read')
+            job = self.finish()
+        self.assertTrue(all(item['name'] == 'АНТОН ВПН' for item in job['items']))
+        self.assertEqual([item['id'] for item in job['items']], ['main', 'node-2'])
+        self.assertEqual(hub.router_update_name({'id': 'node-5', 'name': 'Роутер node-5'}),
+                         'Имя роутера не получено')
+        self.assertEqual(hub.router_update_name({'id': 'node-5', 'custom_name': 'Имя карандашом'}, 'АНТОН ВПН'),
+                         'АНТОН ВПН')
+        self.assertEqual(hub.router_update_name({'id': 'node-5', 'custom_name': 'Имя карандашом',
+                                                'status_json': '{"name":"АНТОН ВПН"}'}), 'АНТОН ВПН')
+
+    def test_refresh_cannot_clear_running_or_newer_queue(self):
+        entered, release = threading.Event(), threading.Event()
+        def ssh(row, script, password):
+            if 'OWRT_UPDATE_READY=1' in script:
+                entered.set(); release.wait(2)
+                return 'OWRT_UPDATE_READY=1\n'
+            return 'OWRT_UPDATE_STATE=done\nOWRT_UPDATE_RC=0\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            task = self.manager.start('echo install', '', 'request-refresh-active')
+            self.assertTrue(entered.wait(2))
+            self.manager.clear_finished(task)
+            self.assertEqual(self.manager.snapshot()['id'], task)
+            release.set()
+            self.finish()
+        self.manager.clear_finished('stale-browser-job')
+        self.assertEqual(self.manager.snapshot()['id'], task)
+        self.manager.clear_finished(task)
+        self.assertIsNone(self.manager.snapshot())
+
     def test_owner_only_api_csrf_and_page_default_hosting(self):
         class Quiet(hub.Handler):
             def log_message(self, *args): pass
@@ -208,6 +406,13 @@ class UpdatesTests(unittest.TestCase):
             self.assertIn(self.manager.csrf, page)
             payload = {'command': 'echo install', 'ssh_password': '', 'request_id': 'request-1234567897'}
             self.assertEqual(request('/api/router-updates/start', payload)[0], 403)
+            self.assertEqual(request('/api/router-updates/refresh', {'id': ''})[0], 403)
+            status, body = request('/api/router-updates')
+            self.assertEqual(status, 200)
+            self.assertIn('online', json.loads(body)['routers'][0])
+            with self.app.conn() as conn:
+                conn.execute('update routers set last_seen=?, status_json=? where id=?',
+                             (hub.now_ts(), json.dumps({'name':'АНТОН ВПН', 'xray':'running'}), 'main'))
             self.assertEqual(request('/api/router-updates/start', payload, csrf=self.manager.csrf, origin='https://attacker.example')[0], 403)
             def ssh(row, script, password):
                 if 'OWRT_UPDATE_READY=1' in script: return 'OWRT_UPDATE_READY=1\n'
@@ -217,6 +422,18 @@ class UpdatesTests(unittest.TestCase):
                 self.assertTrue(all(item['state'] == 'success' for item in self.finish()['items']))
             _, body = request('/api/router-updates')
             self.assertNotIn('ssh_password', body)
+            data = json.loads(body)
+            self.assertTrue(data['routers'][0]['online'])
+            self.assertEqual(data['routers'][0]['xray'], 'running')
+            self.assertIsNotNone(data['job'])
+            with self.app.conn() as conn:
+                conn.execute('update routers set last_seen=? where id=?', (hub.now_ts()-10000, 'main'))
+            status, body = request('/api/router-updates/refresh', {'id': data['job']['id']}, csrf=self.manager.csrf)
+            self.assertEqual(status, 200)
+            data = json.loads(body)
+            self.assertIsNone(data['job'])
+            self.assertFalse(data['routers'][0]['online'])
+            self.assertEqual(data['routers'][0]['name'], 'АНТОН ВПН')
         finally:
             server.shutdown(); server.server_close(); thread.join(3)
 
@@ -229,16 +446,27 @@ class RouterTaskTests(unittest.TestCase):
             root = Path(folder).as_posix()
             task_dir = root + '/task'
             env = {**os.environ, 'PATH': str(Path(shell).parent) + os.pathsep + os.environ['PATH']}
+            # MSYS lacks a setsid command, but its Perl exposes the actual POSIX
+            # syscall. Keep separate process groups, including real cancellation.
+            setsid = Path(folder) / 'setsid'
+            setsid.write_text('#!/usr/bin/perl\nuse POSIX (); POSIX::setsid() >= 0 or die "setsid: $!"; exec @ARGV; die "exec: $!";\n', encoding='utf-8', newline='\n')
+            env['PATH'] = folder + os.pathsep + env['PATH']
+            # Match minimal OpenWrt builds: invoking base64 must fail, even if
+            # it is installed on the test host. Update transport needs none.
+            Path(folder, 'base64').write_text('#!/bin/sh\necho "base64: applet not found" >&2\nexit 127\n', encoding='ascii', newline='\n')
+            Path(folder, 'uci').write_text("#!/bin/sh\nprintf '%s\\n' 'АНТОН ВПН'\n", encoding='utf-8', newline='\n')
             def run(script):
                 file = Path(folder) / 'invoke.sh'
                 file.write_text(script.replace('/tmp/owrt-remote-update-fixture', task_dir), encoding='utf-8', newline='\n')
-                return subprocess.run([shell, file.as_posix()], capture_output=True, text=True, env=env, timeout=8)
+                return subprocess.run([shell, file.as_posix()], capture_output=True, text=True,
+                                      encoding='utf-8', errors='replace', env=env, timeout=15)
+            preflight = hub.router_update_fields(run(hub.router_update_preflight_script()).stdout)
+            self.assertEqual(preflight['READY'], '1')
+            self.assertEqual(preflight['NAME'], 'АНТОН ВПН')
             launch = hub.router_update_launch_script('fixture', 'i=0; while [ "$i" -lt 1200 ]; do echo "A line of output to keep in a bounded tail only"; i=$((i+1)); done; false | cat')
-            # MSYS has FIFO/process support but no setsid applet. Linux OpenWrt
-            # provides setsid; only that platform-specific syscall is adapted.
-            result = run(launch.replace('command -v setsid', 'command -v sh').replace('exec setsid /bin/sh', 'exec /bin/sh'))
+            result = run(launch)
             self.assertEqual(result.returncode, 0, result.stderr)
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 12
             while not (Path(task_dir)/'result').exists() and time.monotonic() < deadline:
                 time.sleep(.05)
             polled = run(hub.router_update_poll_script('fixture'))
@@ -252,8 +480,8 @@ class RouterTaskTests(unittest.TestCase):
             self.assertFalse(Path(task_dir).exists())
             # A successful command yields rc=0 only after completion, and a
             # replay of the same task cannot execute that command twice.
-            good = hub.router_update_launch_script('fixture', 'echo run >>"' + root + '/runs"; echo installed')
-            adapted = good.replace('command -v setsid', 'command -v sh').replace('exec setsid /bin/sh', 'exec /bin/sh')
+            good = hub.router_update_launch_script('fixture', 'echo run >>"' + root + '/runs"; printf \'%s\\n\' \'АНТОН ВПН\'')
+            adapted = good
             self.assertEqual(run(adapted).returncode, 0)
             self.assertEqual(run(adapted).returncode, 0)
             deadline = time.monotonic() + 5
@@ -261,15 +489,73 @@ class RouterTaskTests(unittest.TestCase):
                 time.sleep(.05)
             fields = hub.router_update_fields(run(hub.router_update_poll_script('fixture')).stdout)
             self.assertEqual(fields['RC'], '0')
+            self.assertIn('АНТОН ВПН', fields['OUTPUT'])
             self.assertEqual((Path(folder)/'runs').read_text().splitlines(), ['run'])
             self.assertEqual(run(hub.router_update_poll_script('fixture', cleanup=True)).returncode, 0)
+            # A short line must be visible while the installer is still alive.
+            def wait_for(check, timeout=12):
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    if check(): return
+                    time.sleep(.05)
+                self.fail('Detached task did not reach expected state')
+            task = Path(task_dir)
+            run(hub.router_update_launch_script('fixture', 'echo small-progress; sleep 20; echo must-not-run >>"' + root + '/after-cancel"'))
+            wait_for(lambda: (task/'output').exists() and 'small-progress' in (task/'output').read_text())
+            self.assertFalse((task/'result').exists())
+            self.assertIn('OWRT_UPDATE_CANCEL=1', run(hub.router_update_cancel_script('fixture')).stdout)
+            wait_for(lambda: (task/'result').exists())
+            fields = hub.router_update_fields(run(hub.router_update_poll_script('fixture')).stdout)
+            self.assertEqual(fields['RC'], '130')
+            self.assertEqual(fields['REASON'], 'cancelled')
+            self.assertFalse((Path(folder)/'after-cancel').exists())
+            run(hub.router_update_poll_script('fixture', cleanup=True))
+            run(hub.router_update_launch_script('fixture', 'echo must-not-run'))
+            self.assertFalse((task/'command.sh').exists(), 'A delayed launch after stop must remain blocked')
+            (task/'cancel').unlink()
+            task.rmdir()
+            # A lost VPS connection cannot disable the router's own watchdog.
+            run(hub.router_update_launch_script('fixture', 'sleep 20', timeout=1))
+            wait_for(lambda: (task/'result').exists())
+            fields = hub.router_update_fields(run(hub.router_update_poll_script('fixture')).stdout)
+            self.assertEqual(fields['RC'], '124')
+            self.assertEqual(fields['REASON'], 'timeout')
+            run(hub.router_update_poll_script('fixture', cleanup=True))
+            # A daemon inheriting stdout must not hold result publication open.
+            command = 'sleep 12 & echo $! >"' + root + '/inherited-pid"; echo installed'
+            run(hub.router_update_launch_script('fixture', command))
+            wait_for(lambda: (task/'result').exists(), timeout=8)
+            fields = hub.router_update_fields(run(hub.router_update_poll_script('fixture')).stdout)
+            self.assertEqual(fields['RC'], '0')
+            run('kill "$(cat "' + root + '/inherited-pid")" 2>/dev/null || true\n')
+            run(hub.router_update_poll_script('fixture', cleanup=True))
+            # A cancellation arriving before launch cannot start an installer.
+            run(hub.router_update_cancel_script('fixture'))
+            run(hub.router_update_launch_script('fixture', 'echo must-not-run'))
+            self.assertFalse((task/'command.sh').exists())
+            self.assertFalse((task/'pid').exists())
+            self.assertEqual(hub.router_update_fields(run(hub.router_update_poll_script('fixture')).stdout)['RC'], '130')
+            run(hub.router_update_poll_script('fixture', cleanup=True))
+            (task/'cancel').unlink()
+            task.rmdir()
             # All generated shell scripts must also parse under real BusyBox ash.
             busybox = ROOT / '.test-output/busybox/busybox64.exe'
             script = Path(folder)/'syntax.sh'
+            # Execute the generated command decoder under BusyBox ash itself,
+            # including UTF-8 bytes, without requiring any base64 applet.
+            decode = next(line for line in good.splitlines() if "printf '%b'" in line)
+            script.write_text(decode.split(' >"$job/command.sh"', 1)[0], encoding='ascii', newline='\n')
+            decoded = subprocess.run([str(busybox), 'ash', str(script)], capture_output=True)
+            self.assertEqual(decoded.returncode, 0, decoded.stderr)
+            self.assertEqual(decoded.stdout, ('echo run >>"' + root + '/runs"; printf \'%s\\n\' \'АНТОН ВПН\'').encode('utf-8'))
             script.write_text(launch, encoding='utf-8', newline='\n')
+            self.assertEqual(subprocess.run([str(busybox), 'ash', '-n', str(script)], capture_output=True).returncode, 0)
+            script.write_text(hub.router_update_cancel_script('fixture'), encoding='utf-8', newline='\n')
             self.assertEqual(subprocess.run([str(busybox), 'ash', '-n', str(script)], capture_output=True).returncode, 0)
             runner = launch.split("<<'OWRT_UPDATE_RUNNER'\n", 1)[1].split('\nOWRT_UPDATE_RUNNER', 1)[0]
             script.write_text(runner, encoding='utf-8', newline='\n')
+            self.assertEqual(subprocess.run([str(busybox), 'ash', '-n', str(script)], capture_output=True).returncode, 0)
+            script.write_text(hub.router_update_preflight_script(), encoding='utf-8', newline='\n')
             self.assertEqual(subprocess.run([str(busybox), 'ash', '-n', str(script)], capture_output=True).returncode, 0)
 
 

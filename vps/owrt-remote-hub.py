@@ -20,6 +20,7 @@ import re
 import secrets
 import select
 import signal
+import shlex
 import socket
 import ssl
 import sqlite3
@@ -12224,39 +12225,56 @@ def router_updates_html(csrf):
 *{box-sizing:border-box}body{min-height:100vh;margin:0;background:#07040f;background-image:radial-gradient(circle at 16% 10%,#a855f740,transparent 35%),linear-gradient(145deg,#07040f,#120a24 54%,#05030a);background-attachment:fixed;color:#f7f2ff;font:14px/1.5 system-ui,sans-serif}
 .wrap{max-width:1100px;margin:auto;padding:20px}.panel{margin-bottom:14px;padding:18px;border:1px solid var(--line);border-radius:12px;background:#191226e8}.head,.actions{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 10px}.hint{color:var(--muted);font-size:13px}.note{margin:14px 0;padding:10px 12px;border:1px solid #f59e0b70;border-left:3px solid #f59e0b;border-radius:8px;background:#f59e0b12;color:#fde68a}
 label{display:block;margin:14px 0 6px;font-weight:700}textarea,input{display:block;width:100%;min-width:0;border:1px solid var(--line);border-radius:8px;background:#0d0917;color:#f7f2ff;padding:11px;font:14px/1.5 ui-monospace,Consolas,monospace}textarea{min-height:110px;resize:vertical}input{max-width:480px}button,.btn{display:inline-flex;align-items:center;justify-content:center;min-height:42px;border:1px solid var(--line);border-radius:8px;padding:9px 14px;background:#393044;color:#f7f2ff;font:700 13px system-ui;cursor:pointer;text-decoration:none}.primary{background:#7c3aed}button:disabled{opacity:.5;cursor:default}.actions{justify-content:flex-start;margin-top:16px}.ok{color:#86efac}.error{color:#fda4af}.warn{color:#fde68a}#status{margin:12px 0;overflow-wrap:anywhere}.router{border-top:1px solid var(--line);padding:13px 0}.router:first-child{border-top:0}.router strong{display:block;overflow-wrap:anywhere}.router p{margin:5px 0;overflow-wrap:anywhere}.router small{color:var(--muted)}pre{max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0d0917;border:1px solid var(--line);border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace}summary{cursor:pointer;color:var(--muted)}
-@media(max-width:680px){.wrap{padding:10px}.panel{padding:12px}.head{align-items:stretch;flex-direction:column}h1{font-size:19px}.actions{display:grid;grid-template-columns:1fr}.btn,button{width:100%}input{max-width:none}body{background-attachment:scroll}}
+.head-actions{display:flex;gap:8px;flex-wrap:wrap}.queue-dashboard{margin:18px 0 14px;padding:18px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,#30203e90,#141521b0)}.queue-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.queue-heading h2{margin:0;font-size:17px}.queue-badge{padding:4px 10px;border:1px solid #a78bfa50;border-radius:20px;background:#a78bfa12;color:#d8c8ff;font-size:12px;font-weight:700}.progress-label{display:flex;justify-content:space-between;gap:12px;margin-bottom:7px;color:var(--muted);font-size:12px}.progress-track{height:7px;overflow:hidden;border-radius:8px;background:#ffffff0b}.progress-fill{height:100%;width:0;background:linear-gradient(90deg,#8b5cf6,#38bdf8);border-radius:8px;transition:width .25s}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:16px}.metric{--accent:#c4b5fd;min-width:0;padding:13px 12px;border:1px solid #ffffff12;border-top:2px solid var(--accent);border-radius:9px;background:#100b1b90}.metric[data-state=success]{--accent:#86efac}.metric[data-state=error]{--accent:#fda4af}.metric[data-state=unknown]{--accent:#fcd34d}.metric[data-state=cancelled]{--accent:#fdba74}.metric[data-state=skipped]{--accent:#b9adc9}.metric[data-state=active]{--accent:#7dd3fc}.metric span{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.metric strong{display:block;margin-top:5px;color:var(--accent);font-size:27px;line-height:1.1;font-variant-numeric:tabular-nums}.router-live{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:7px 0;color:var(--muted);font-size:12px}.live-badge{padding:2px 8px;border-radius:20px;background:#ffffff08;border:1px solid #ffffff16}.live-badge.online{color:#86efac;border-color:#86efac40;background:#86efac0a}.live-badge.offline{color:#fda4af;border-color:#fda4af40;background:#fda4af0a}
+@media(max-width:680px){.wrap{padding:10px}.panel{padding:12px}.head{align-items:stretch;flex-direction:column}h1{font-size:19px}.actions,.head-actions{display:grid;grid-template-columns:1fr}.btn,button{width:100%}input{max-width:none}body{background-attachment:scroll}.queue-dashboard{padding:12px}.queue-heading{align-items:flex-start}.queue-heading h2{font-size:16px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.metric{padding:12px}.metric strong{font-size:26px}}
 </style></head><body><main class="wrap">
-<section class="panel"><div class="head"><h1>Обновить все роутеры разом</h1><a class="btn" href="/">Вернуться в Hub</a></div>
+<section class="panel"><div class="head"><h1>Обновить все роутеры разом</h1><div class="head-actions"><button id="refreshRouters" type="button" disabled>Обновить список роутеров</button><a class="btn" href="/">Вернуться в Hub</a></div></div>
 <blockquote class="note">Команда выполняется на роутерах по очереди через SSH. Укажи один общий SSH-пароль root. Для каждого роутера будет отдельный итог. Если туннель не работает, обновить этот роутер через VPS не получится.</blockquote>
-<form id="updateForm"><label for="command">Команда обновления</label><textarea id="command" name="command" required maxlength="8192" autocapitalize="off" autocorrect="off" spellcheck="false">__COMMAND__</textarea>
+<form id="updateForm"><label for="command">Ссылка или команда обновления</label><textarea id="command" name="command" required maxlength="8192" autocapitalize="off" autocorrect="off" spellcheck="false">__COMMAND__</textarea>
+<div class="hint">Вставь прямую ссылку HTTP/HTTPS на установочный shell-скрипт с любого своего источника или полную команду. Для ссылки загрузка и запуск выполняются автоматически.</div>
 <label for="sshPassword">Общий SSH-пароль root на роутерах</label><input id="sshPassword" name="ssh_password" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Оставь пустым, если настроен SSH-ключ">
 <div class="hint">Пароль используется только текущей очередью и не сохраняется на диске или в браузере. Закрытие вкладки не останавливает обновления. Перезапуск Hub прерывает очередь; начатая установка на роутере продолжает работать.</div>
-<div class="actions"><button class="primary" id="start" type="submit" disabled>Обновить все по очереди</button><button id="cancel" type="button" disabled>Остановить очередь после текущего</button></div></form>
+<div class="actions"><button class="primary" id="start" type="submit" disabled>Обновить все по очереди</button><button id="cancel" type="button" disabled>Остановить всё</button></div></form>
+<div class="hint">«Остановить всё» сразу прекращает очередь и отправляет остановку текущей задачи. Уже внесённые установщиком изменения не откатываются. Если SSH недоступен, панель покажет, что остановка на роутере не подтверждена.</div>
+<section class="queue-dashboard" aria-label="Статистика очереди"><div class="queue-heading"><h2 id="queueTitle">Список роутеров</h2><span class="queue-badge" id="queueBadge">Загрузка</span></div>
+<div class="progress-label"><span id="progressText">Получаю данные…</span><span id="progressPercent">0%</span></div><div class="progress-track" id="queueProgress" role="progressbar" aria-label="Ход очереди" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-fill" id="progressFill"></div></div>
+<div class="metrics"><div class="metric" data-state="total"><span>Всего роутеров</span><strong id="countTotal">0</strong></div><div class="metric" data-state="active"><span>Обновляются</span><strong id="countActive">0</strong></div><div class="metric" data-state="queued"><span>Ожидают</span><strong id="countQueued">0</strong></div><div class="metric" data-state="success"><span>Успешно</span><strong id="countSuccess">0</strong></div><div class="metric" data-state="error"><span>Ошибок</span><strong id="countError">0</strong></div><div class="metric" data-state="unknown"><span>Не подтверждено</span><strong id="countUnknown">0</strong></div><div class="metric" data-state="cancelled"><span>Остановлено</span><strong id="countCancelled">0</strong></div><div class="metric" data-state="skipped"><span>Пропущено</span><strong id="countSkipped">0</strong></div></div></section>
 <div id="status" role="status" aria-live="polite">Получаю список роутеров…</div></section>
-<section class="panel"><h2>Ход обновления</h2><div id="results"></div></section>
+<section class="panel"><h2>Роутеры</h2><div class="hint">Текущая связь определяется по Heartbeat. Итог установки показан отдельно и не означает, что роутер сейчас онлайн.</div><div id="results"></div></section>
 </main><script>
 (()=>{
   const csrf=__CSRF__, endpoint='/api/router-updates', form=document.getElementById('updateForm'), command=document.getElementById('command'), password=document.getElementById('sshPassword'), start=document.getElementById('start'), cancel=document.getElementById('cancel'), status=document.getElementById('status'), results=document.getElementById('results');
-  let timer=null, pending=false, job=null, lastRender='', stopped=false, generation=0;
+  const refreshRouters=document.getElementById('refreshRouters');
+  let timer=null, pending=false, refreshing=false, job=null, routers=[], lastRender='', stopped=false, generation=0;
   let requestId='';
   const requestKey='owrt-router-update-request';
   try{requestId=sessionStorage.getItem(requestKey)||'';}catch(error){}
   function requestToken(){if(!requestId){const bytes=crypto.getRandomValues(new Uint8Array(16));requestId=Array.from(bytes,n=>n.toString(16).padStart(2,'0')).join('');try{sessionStorage.setItem(requestKey,requestId);}catch(error){}}return requestId;}
   function forgetRequest(){requestId='';try{sessionStorage.removeItem(requestKey);}catch(error){}}
-  function controls(){const active=job&&job.state==='running';start.disabled=pending||active;command.disabled=pending||active;password.disabled=pending||active;cancel.disabled=pending||!active||job.cancel_requested;}
+  function controls(){const active=job&&job.state==='running';start.disabled=pending||active;command.disabled=pending||active;password.disabled=pending||active;cancel.disabled=pending||!active||job.cancel_requested;refreshRouters.disabled=pending;refreshRouters.textContent=refreshing?'Обновляю список…':'Обновить список роутеров';}
+  function dashboard(){
+    const items=job?job.items:[],count=state=>items.filter(x=>x.state===state).length,counts={Total:job?items.length:routers.length,Active:items.filter(x=>['connecting','running','cancelling'].includes(x.state)).length,Queued:count('queued'),Success:count('success'),Error:count('error'),Unknown:count('unknown'),Cancelled:count('cancelled'),Skipped:count('skipped')};
+    Object.entries(counts).forEach(([key,value])=>{document.getElementById('count'+key).textContent=value;});
+    const done=counts.Success+counts.Error+counts.Unknown+counts.Cancelled+counts.Skipped,percent=counts.Total&&job?Math.round(done*100/counts.Total):0;
+    document.getElementById('queueTitle').textContent=summary();document.getElementById('queueBadge').textContent=job?(job.state==='running'?(job.cancel_requested?'Остановка':'В работе'):'Завершена'):'Готово к запуску';
+    document.getElementById('progressText').textContent=job?'Обработано '+done+' из '+counts.Total:'Актуальный список · '+routers.filter(x=>x.online===true).length+' в сети';
+    document.getElementById('progressPercent').textContent=percent+'%';document.getElementById('progressFill').style.width=percent+'%';document.getElementById('queueProgress').setAttribute('aria-valuenow',percent);
+  }
   function render(data){
-    job=data.job;controls();const items=job?job.items:(data.routers||[]), signature=JSON.stringify(items);if(signature===lastRender)return;lastRender=signature;
+    job=data.job;routers=data.routers||[];controls();dashboard();const items=job?job.items:routers, signature=JSON.stringify([items,routers]);if(signature===lastRender)return;lastRender=signature;
     const open=new Map(Array.from(results.querySelectorAll('article')).map(row=>[row.dataset.router,{open:!!row.querySelector('details[open]'),top:row.querySelector('pre')?.scrollTop||0}])), fragment=document.createDocumentFragment();
     items.forEach(item=>{const row=document.createElement('article'), title=document.createElement('strong'), detail=document.createElement('p'), id=document.createElement('small');
-      row.className='router';row.dataset.router=item.id;title.textContent=(item.state==='success'?'Успешно — ':item.state==='error'?'Ошибка — ':item.state==='unknown'?'Не подтверждено — ':'')+(item.name||item.id);title.className=item.state==='success'?'ok':item.state==='error'?'error':item.state==='unknown'?'warn':'';detail.textContent=item.message||'Готов к постановке в очередь';id.textContent=item.id;row.append(title,id,detail);
+      row.className='router';row.dataset.router=item.id;title.textContent=(item.state==='success'?'Успешно — ':item.state==='error'?'Ошибка — ':item.state==='unknown'?'Не подтверждено — ':item.state==='cancelled'?'Остановлено — ':'')+(item.name||'Имя роутера не получено');title.className=item.state==='success'?'ok':item.state==='error'?'error':['unknown','cancelled'].includes(item.state)?'warn':'';detail.textContent=item.message||'Готов к постановке в очередь';id.textContent='ID: '+item.id;row.append(title,id,detail);
+      const current=routers.find(router=>router.id===item.id),live=document.createElement('div'),badge=document.createElement('span'),last=document.createElement('span');live.className='router-live';badge.className='live-badge'+(current?(current.online?' online':' offline'):'');badge.textContent=current?(current.online?'● Онлайн':'● Офлайн'):'Статус не получен';last.textContent=current&&current.last_seen?'Heartbeat: '+new Date(current.last_seen*1000).toLocaleString('ru-RU'):'Heartbeat ещё не получен';live.append(badge,last);if(current&&current.xray){const xray=document.createElement('span');xray.textContent=(current.online?'Xray: ':'Последний статус Xray: ')+(current.xray==='running'?'запущен':current.xray==='stopped'?'остановлен':'нет данных');live.append(xray);}row.insertBefore(live,detail);
       if(item.output){const details=document.createElement('details'), summary=document.createElement('summary'), output=document.createElement('pre');summary.textContent='Вывод команды';output.textContent=item.output;details.open=!!open.get(item.id)?.open;details.append(summary,output);row.append(details);}fragment.append(row);
     });results.replaceChildren(fragment);results.querySelectorAll('article').forEach(row=>{const output=row.querySelector('pre');if(output)output.scrollTop=open.get(row.dataset.router)?.top||0;});
   }
-  function summary(){if(!job)return 'В очереди будут все роутеры из Hub.';const items=job.items, count=state=>items.filter(x=>x.state===state).length;return (job.state==='running'?'Обновление выполняется. ':'Очередь завершена. ')+'Успешно: '+count('success')+' · Ошибок: '+count('error')+' · Не подтверждено: '+count('unknown')+' · Пропущено: '+count('skipped')+' · Всего: '+items.length;}
+  function summary(){return !job?'Список роутеров обновлён':job.state==='running'?(job.cancel_requested?'Останавливаю обновление':'Обновление выполняется'):'Очередь завершена';}
   async function api(path,body){const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),15000);try{const response=await fetch(endpoint+path,{method:body?'POST':'GET',cache:'no-store',headers:body?{'Content-Type':'application/json','X-Router-Update-CSRF':csrf}:{},body:body?JSON.stringify(body):undefined,signal:controller.signal});if(response.status===401){window.location.replace('/login');throw new Error('Нужен вход в Hub');}const data=await response.json();if(!response.ok)throw new Error(data.error||'HTTP '+response.status);return data;}finally{clearTimeout(timeout);}}
   async function refresh(){if(stopped||pending)return;const current=++generation;if(timer!==null)clearTimeout(timer);timer=null;try{const data=await api('');if(current!==generation||pending)return;render(data);status.className='';status.textContent=summary();if(job&&job.state!=='running'&&job.request_id===requestId)forgetRequest();}catch(error){if(current===generation){status.className='error';status.textContent='Не удалось получить состояние: '+error.message;}}finally{if(!stopped&&!pending&&current===generation)timer=setTimeout(refresh,3000);}}
   form.addEventListener('submit',async event=>{event.preventDefault();if(pending||(job&&job.state==='running'))return;generation++;pending=true;controls();if(timer!==null)clearTimeout(timer);try{const body={command:command.value,ssh_password:password.value,request_id:requestToken()};const data=await api('/start',body);password.value='';render(data);status.className='';status.textContent=summary();}catch(error){password.value='';status.className='error';status.textContent='Запуск не подтверждён: '+error.message+'. Проверяю состояние очереди.';}finally{pending=false;controls();if(!stopped)timer=setTimeout(refresh,1000);}});
-  cancel.addEventListener('click',async()=>{if(!job||pending)return;generation++;if(timer!==null)clearTimeout(timer);pending=true;controls();try{const data=await api('/cancel',{id:job.id});render(data);status.textContent='Текущая установка завершится; остальные роутеры будут пропущены.';}catch(error){status.textContent=error.message;}finally{pending=false;controls();if(!stopped)timer=setTimeout(refresh,1000);}});
+  cancel.addEventListener('click',async()=>{if(!job||pending)return;generation++;if(timer!==null)clearTimeout(timer);pending=true;controls();status.textContent='Останавливаю текущую задачу и очередь…';try{const data=await api('/cancel',{id:job.id});render(data);status.textContent=summary();}catch(error){status.textContent='Остановка не подтверждена: '+error.message;}finally{pending=false;controls();if(!stopped)timer=setTimeout(refresh,1000);}});
+  refreshRouters.addEventListener('click',async()=>{if(pending)return;const current=++generation;if(timer!==null)clearTimeout(timer);pending=true;refreshing=true;controls();status.className='';status.textContent='Обновляю список и статусы роутеров…';try{const data=await api('/refresh',{id:job?job.id:''});if(current!==generation)return;render(data);if(!job)forgetRequest();status.textContent=job?'Статусы обновлены. '+summary():'Список и статусы обновлены. Можно запустить новую очередь.';}catch(error){status.className='error';status.textContent='Не удалось обновить список: '+error.message;}finally{pending=false;refreshing=false;controls();if(!stopped)timer=setTimeout(refresh,3000);}});
   window.addEventListener('pagehide',()=>{stopped=true;if(timer!==null)clearTimeout(timer);password.value='';});
   window.addEventListener('pageshow',()=>{if(stopped){stopped=false;refresh();}});refresh();
 })();
@@ -14383,27 +14401,113 @@ class VpsResourceMonitor:
             return self.cached
 
 
-def router_update_launch_script(task_id, command):
+def normalize_router_update_command(command):
+    command = command.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
+    url = command[1:-1] if command[:1] in {'"', "'"} and command[-1:] == command[:1] else command
+    if not re.match(r'(?i)^https?://', url):
+        return command
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        valid = parsed.hostname and parsed.scheme.lower() in {'http', 'https'} and parsed.port != 0
+    except ValueError:
+        valid = False
+    if not valid or re.search(r'\s|[\x00-\x1f\x7f]', url):
+        raise ValueError('Нужна прямая ссылка HTTP/HTTPS без пробелов или полная shell-команда обновления.')
+    return '''set -e
+: "${OWRT_REMOTE_UPDATE_DIR:?}"
+file="$OWRT_REMOTE_UPDATE_DIR/download.sh"
+echo 'Загрузка установочного скрипта…'
+if command -v curl >/dev/null 2>&1; then
+    curl -fL --connect-timeout 10 -o "$file" -- __URL__
+else
+    wget -O "$file" __URL__
+fi
+[ -s "$file" ] || { echo 'Ошибка: получен пустой установочный скрипт'; exit 1; }
+echo 'Скрипт загружен; запуск установки…'
+/bin/sh "$file"
+'''.replace('__URL__', shlex.quote(url))
+
+
+def router_update_name(row, reported_name=''):
+    """Prefer UCI's router_name; keep the stable router ID a separate field."""
+    try:
+        cached_name = json.loads(row.get('status_json') or '{}').get('name')
+    except (ValueError, AttributeError):
+        cached_name = ''
+    for value in (reported_name, cached_name, row.get('custom_name')):
+        name = re.sub(r'[\x00-\x1f\x7f]', ' ', str(value or '')).strip()[:200]
+        if name:
+            return name
+    return 'Имя роутера не получено'
+
+
+def router_update_status(row):
+    try:
+        status = json.loads(row.get('status_json') or '{}')
+        status = status if isinstance(status, dict) else {}
+    except ValueError:
+        status = {}
+    last_seen = int(row.get('last_seen') or 0)
+    xray = str(status.get('xray') or '')
+    return {'id': row['id'], 'name': router_update_name(row),
+            'online': bool(last_seen and now_ts() - last_seen <= router_online_timeout(status)),
+            'last_seen': last_seen,
+            'xray': xray if xray in {'running', 'stopped'} else 'unknown'}
+
+
+def router_update_preflight_script():
+    return r'''set -eu
+printf 'OWRT_UPDATE_NAME_TEXT='
+(uci -q get owrtremote.main.router_name || true) | head -c 512 | tr '\r\n' '  '
+printf '\n'
+for tool in uci setsid mkfifo dd cut head tail tr wc cat mv rm mkdir sleep; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'OWRT_UPDATE_STATE=not_started\nOWRT_UPDATE_ERROR=На роутере отсутствует утилита %s. Команда обновления не запускалась.\n' "$tool"
+        exit 0
+    fi
+done
+printf 'OWRT_UPDATE_READY=1\n'
+'''
+
+
+def router_update_launch_script(task_id, command, timeout=180):
     """Stage a detached router-side task; never execute the owner's command on VPS."""
-    encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
+    # POSIX printf is an ash builtin even when BusyBox has no base64 applet.
+    encoded = ''.join('\\0%03o' % byte for byte in command.encode('utf-8'))
     return r'''set -eu
 umask 077
 job=/tmp/owrt-remote-update-__TASK__
+limit=__TIMEOUT__
+started=0
+launch_exit() {
+    rc=$?
+    trap - EXIT
+    if [ "$rc" -ne 0 ] && [ "$started" = 0 ]; then
+        printf 'OWRT_UPDATE_STATE=not_started\nOWRT_UPDATE_ERROR=Подготовка задачи на роутере завершилась ошибкой, rc=%s. Команда обновления не запускалась.\n' "$rc"
+        exit 0
+    fi
+    exit "$rc"
+}
+trap launch_exit EXIT
 if [ ! -d "$job" ]; then
     command -v setsid >/dev/null || { echo 'setsid is required'; exit 1; }
     mkdir "$job"
-    printf '%s' '__COMMAND__' | base64 -d >"$job/command.sh"
+    printf '%b' '__COMMAND__' >"$job/command.sh"
     cat >"$job/runner.sh" <<'OWRT_UPDATE_RUNNER'
 #!/bin/sh
 umask 077
 job=$1
-printf '%s\n' "$$" >"$job/pid"
-mkfifo "$job/stream" || exit 1
-# A bounded output tail in RAM. No growing log file, shell variable containing
-# the whole output, or writer that survives a normally completed command.
-(
+clock() { cut -d. -f1 /proc/uptime; }
+stop_group() {
+    case "$1" in ''|*[!0-9]*) return;; esac
+    [ "$1" -gt 1 ] || return
+    kill -TERM "-$1" 2>/dev/null || true
+    sleep 1
+    kill -KILL "-$1" 2>/dev/null || true
+}
+if [ "${2:-}" = reader ]; then
     while :; do
-        dd bs=4096 count=1 iflag=fullblock <&3 >"$job/chunk" 2>/dev/null
+        dd bs=4096 count=1 <&3 >"$job/chunk" 2>/dev/null
         [ -s "$job/chunk" ] || break
         cat "$job/chunk" >>"$job/output"
         bytes=$(wc -c <"$job/output")
@@ -14411,31 +14515,88 @@ mkfifo "$job/stream" || exit 1
             tail -c 16384 "$job/output" >"$job/output.new" && mv "$job/output.new" "$job/output"
         fi
     done 3<"$job/stream"
-) &
+    exit
+fi
+limit=$2
+printf '%s\n' "$$" >"$job/pid"
+clock >"$job/started"
+printf '%s\n' "$limit" >"$job/limit"
+if [ -e "$job/cancel" ]; then
+    echo cancelled >"$job/reason"
+    echo 130 >"$job/result"
+    exit 0
+fi
+mkfifo "$job/stream" || exit 1
+# Separate groups let cancellation target only this task's processes.
+setsid /bin/sh "$job/runner.sh" "$job" reader &
 reader=$!
+export OWRT_REMOTE_UPDATE_DIR="$job"
 # BusyBox ash's pipefail also catches wget failures in `wget ... | sh`.
-/bin/sh -ec 'set -o pipefail; . "$1"' sh "$job/command.sh" >"$job/stream" 2>&1
-rc=$?
-wait "$reader" || { [ "$rc" -ne 0 ] || rc=125; }
+setsid /bin/sh -ec 'set -o pipefail; . "$1"' sh "$job/command.sh" >"$job/stream" 2>&1 &
+installer=$!
+reason=exit
+started=$(cat "$job/started")
+while kill -0 "$installer" 2>/dev/null; do
+    if [ -e "$job/cancel" ]; then reason=cancelled; break; fi
+    now=$(clock)
+    if [ "$((now - started))" -ge "$limit" ]; then reason=timeout; break; fi
+    sleep 1
+done
+if [ "$reason" != exit ]; then
+    stop_group "$installer"
+    wait "$installer" 2>/dev/null || true
+    if [ "$reason" = cancelled ]; then rc=130; else rc=124; fi
+else
+    wait "$installer"
+    rc=$?
+fi
+# A daemon may inherit stdout from the installer. Bound FIFO drain time.
+drain=0
+while kill -0 "$reader" 2>/dev/null && [ "$drain" -lt 2 ]; do sleep 1; drain=$((drain + 1)); done
+if kill -0 "$reader" 2>/dev/null; then
+    stop_group "$reader"
+    wait "$reader" 2>/dev/null || true
+else
+    wait "$reader" || { [ "$rc" -ne 0 ] || rc=125; }
+fi
+printf '%s\n' "$reason" >"$job/reason"
 printf '%s\n' "$rc" >"$job/result.new"
 mv "$job/result.new" "$job/result"
-rm -f "$job/stream" "$job/chunk" "$job/command.sh" "$job/runner.sh"
+rm -f "$job/stream" "$job/chunk" "$job/command.sh" "$job/download.sh" "$job/runner.sh"
 OWRT_UPDATE_RUNNER
     # OpenWrt supplies setsid by default; nohup is optional. Ignore HUP before
     # exec so loss of the reverse SSH connection cannot kill the installer.
-    (trap '' HUP; exec setsid /bin/sh "$job/runner.sh" "$job") </dev/null >/dev/null 2>&1 &
+    (trap '' HUP; exec setsid /bin/sh "$job/runner.sh" "$job" "$limit") </dev/null >/dev/null 2>&1 &
 fi
-printf 'OWRT_UPDATE_NAME='
-(uci -q get owrtremote.main.router_name || true) | head -c 512 | base64 | tr -d '\r\n'
-printf '\nOWRT_UPDATE_STARTED=1\n'
-'''.replace('__TASK__', task_id).replace('__COMMAND__', encoded)
+started=1
+printf 'OWRT_UPDATE_STARTED=1\n'
+'''.replace('__TASK__', task_id).replace('__COMMAND__', encoded).replace('__TIMEOUT__', str(int(timeout)))
+
+
+def router_update_cancel_script(task_id):
+    # A tombstone blocks delayed launches; the runner records the actual result
+    # after stopping its own installer group, without matching unrelated PIDs.
+    return ('umask 077\njob=/tmp/owrt-remote-update-' + task_id + '\n'
+            + '''if mkdir "$job" 2>/dev/null; then
+    : >"$job/cancel"
+    echo cancelled >"$job/reason"
+    echo 130 >"$job/result.new"
+    mv "$job/result.new" "$job/result"
+else
+    : >"$job/cancel"
+fi
+echo OWRT_UPDATE_CANCEL=1
+''')
 
 
 def router_update_poll_script(task_id, cleanup=False):
     prefix = 'job=/tmp/owrt-remote-update-' + task_id + '\n'
     if cleanup:
         return prefix + '''[ -s "$job/result" ] || exit 0
-rm -f "$job/result" "$job/result.new" "$job/pid" "$job/output" "$job/output.new" "$job/chunk" "$job/stream" "$job/command.sh" "$job/runner.sh"
+rm -f "$job/result" "$job/result.new" "$job/pid" "$job/output" "$job/output.new" "$job/chunk" "$job/stream" "$job/command.sh" "$job/download.sh" "$job/runner.sh" "$job/started" "$job/limit" "$job/reason"
+# Keep the tiny cancellation marker until reboot. A launch still in transit
+# must not start this task after the confirmed result has been cleaned up.
+[ ! -e "$job/cancel" ] || exit 0
 rmdir "$job" 2>/dev/null || true
 '''
     return prefix + r'''if [ ! -d "$job" ]; then echo OWRT_UPDATE_STATE=missing; exit 0; fi
@@ -14444,18 +14605,23 @@ if [ -s "$job/result" ]; then
     echo OWRT_UPDATE_STATE=done
 elif [ -s "$job/pid" ] && kill -0 "$(cat "$job/pid")" 2>/dev/null; then
     echo OWRT_UPDATE_STATE=running
+elif [ -s "$job/pid" ]; then
+    echo OWRT_UPDATE_STATE=dead
 else
     echo OWRT_UPDATE_STATE=starting
 fi
-printf 'OWRT_UPDATE_OUTPUT='
-tail -c 8192 "$job/output" 2>/dev/null | base64 | tr -d '\r\n'
-printf '\n'
+printf 'OWRT_UPDATE_REASON='; cat "$job/reason" 2>/dev/null || echo
+printf 'OWRT_UPDATE_OUTPUT_TEXT=\n'
+tail -c 8192 "$job/output" 2>/dev/null || true
 '''
 
 
 def router_update_fields(output):
+    # The final text payload is bounded on the router. Parse metadata only
+    # before it, so installer output cannot forge a result or another name.
+    header, separator, payload = str(output or '').partition('\nOWRT_UPDATE_OUTPUT_TEXT=\n')
     fields = {}
-    for line in str(output or '').splitlines():
+    for line in header.splitlines():
         key, separator, value = line.partition('=')
         if separator and key.startswith('OWRT_UPDATE_'):
             fields[key.removeprefix('OWRT_UPDATE_')] = value
@@ -14464,13 +14630,21 @@ def router_update_fields(output):
             fields[key] = base64.b64decode(fields.get(key, ''), validate=True).decode('utf-8', 'replace')
         except (ValueError, UnicodeError):
             fields[key] = ''
+    if 'NAME_TEXT' in fields:
+        fields['NAME'] = fields.pop('NAME_TEXT').strip()
+    if separator:
+        fields['OUTPUT'] = payload
     return fields
 
 
 class RouterUpdateManager:
     """One sequential owner-controlled queue per Hub, independent of the browser."""
     POLL_SECONDS = 3
-    ROUTER_TIMEOUT = 900
+    ROUTER_TIMEOUT = 180
+    LAUNCH_TIMEOUT = 15
+    CONNECTION_TIMEOUT = 30
+    SILENCE_TIMEOUT = 90
+    STOP_TIMEOUT = 10
     RESULT_TTL = 7200
 
     def __init__(self, app):
@@ -14480,17 +14654,70 @@ class RouterUpdateManager:
         self.job = None
         self.thread = None
         self.stopping = threading.Event()
+        self.wake = threading.Event()
+        self.cancel_event = threading.Event()
+        self.transport_lock = threading.Lock()
+        self.transport = None
 
     def _ssh(self, row, script, password):
-        # These transport helpers use no request headers or client connection.
+        # Keep this transport interruptible without changing other SSH features.
         helper = Handler.__new__(Handler)
-        return helper.run_router_ssh_script(row, script, timeout=20, ssh_password=password)
+        env, args = helper.ssh_exec_args(int(row['ssh_entry_port']), allow_password=bool(password))
+        askpass = helper.prepare_ssh_askpass(env, password)
+        process = None
+        received = False
+        try:
+            process = subprocess.Popen(args + ['sh', '-s', '--'], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                       encoding='utf-8', errors='replace', env=env,
+                                       start_new_session=bool(password))
+            with self.transport_lock:
+                self.transport = process
+            try:
+                stdout, stderr = process.communicate(str(script), timeout=10)
+                received = True
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError('SSH: нет ответа за 10 секунд') from exc
+            if process.returncode:
+                raise RuntimeError((stderr or stdout or '').strip() or 'SSH-соединение прервано')
+            return stdout
+        finally:
+            if process:
+                if process.poll() is None:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                if not received:
+                    process.communicate()
+                with self.transport_lock:
+                    if self.transport is process:
+                        self.transport = None
+            if askpass:
+                shutil.rmtree(askpass, ignore_errors=True)
+
+    def _interrupt_transport(self):
+        with self.transport_lock:
+            process = self.transport
+            if process and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 
     def snapshot(self):
         with self.lock:
             if self.job and self.job['state'] != 'running' and time.time() - self.job['finished_at'] > self.RESULT_TTL:
                 self.job = None
             return json.loads(json.dumps(self.job)) if self.job else None
+
+    def clear_finished(self, job_id):
+        if not isinstance(job_id, str):
+            raise ValueError('Некорректный идентификатор очереди.')
+        with self.lock:
+            # A stale browser must not erase a newer job or an active worker.
+            if self.job and self.job['id'] == job_id and self.job['state'] != 'running':
+                self.job = None
 
     def start(self, command, password, request_id):
         if not isinstance(command, str) or not command.strip() or len(command.encode('utf-8')) > 8192 or '\x00' in command:
@@ -14499,7 +14726,7 @@ class RouterUpdateManager:
             raise ValueError('Некорректный SSH-пароль.')
         if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{16,80}', request_id):
             raise ValueError('Некорректный идентификатор запроса. Обнови страницу.')
-        command = command.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
+        command = normalize_router_update_command(command)
         with self.lock:
             if self.job and self.job['request_id'] == request_id:
                 return self.job['id']
@@ -14507,6 +14734,8 @@ class RouterUpdateManager:
                 raise RuntimeError('Очередь уже запущена. Дождись её завершения или останови оставшиеся обновления.')
             if self.stopping.is_set():
                 raise RuntimeError('Hub завершает работу. Повтори после запуска.')
+            self.cancel_event.clear()
+            self.wake.clear()
             with self.app.conn() as conn:
                 rows = [dict(row) for row in list_router_rows(conn)]
             if not rows:
@@ -14515,12 +14744,8 @@ class RouterUpdateManager:
                 raise ValueError('В одной очереди поддерживается до 512 роутеров.')
             items = []
             for row in rows:
-                try:
-                    reported_name = json.loads(row.get('status_json') or '{}').get('name')
-                except (ValueError, AttributeError):
-                    reported_name = ''
-                items.append({'id': row['id'], 'name': str(reported_name or row.get('name') or row['id'])[:200],
-                              'state': 'queued', 'message': 'Ожидает очереди', 'output': ''})
+                items.append({'id': row['id'], 'name': router_update_name(row),
+                              'state': 'queued', 'message': 'Ожидает очереди', 'output': '', 'elapsed_seconds': 0})
             job_id = secrets.token_hex(16)
             self.job = {'id': job_id, 'request_id': request_id, 'state': 'running', 'started_at': time.time(),
                         'finished_at': 0, 'cancel_requested': False, 'items': items}
@@ -14539,6 +14764,15 @@ class RouterUpdateManager:
             if not self.job or self.job['id'] != job_id:
                 raise ValueError('Очередь не найдена.')
             self.job['cancel_requested'] = True
+            for item in self.job['items']:
+                if item['state'] == 'queued':
+                    item.update(state='skipped', message='Пропущен: очередь остановлена пользователем')
+                elif item['state'] in {'connecting', 'running', 'cancelling'}:
+                    item['state'] = 'cancelling'
+                    item['message'] = 'Останавливаю текущую задачу…'
+            self.cancel_event.set()
+            self.wake.set()
+        self._interrupt_transport()
 
     def _set(self, index, **values):
         with self.lock:
@@ -14573,6 +14807,11 @@ class RouterUpdateManager:
                 return ('Общий SSH-пароль не принят этим роутером. Возможно, пароль роутера отличается '
                         'от общего; проверь его пароль и разрешение входа root по SSH.')
             return 'SSH-авторизация отклонена. Укажи пароль root или проверь SSH-ключ доступа к этому роутеру.'
+        safe = cls._safe(text, password)[:1200]
+        if re.search(r'(?i)(?:connection timed out during banner exchange|banner exchange:.*(?:timed out|timeout))', text):
+            return ('SSH не прислал приветствие за отведённое время. До проверки пароля дело не дошло. '
+                    'По этому ответу нельзя отличить проблему обратного туннеля от зависания SSH-сервера. '
+                    'Технический ответ: ' + safe)
         return cls._safe(text, password)[:1200] or 'Ошибка подключения по SSH'
 
     def _run(self, rows, command, password, job_id):
@@ -14591,13 +14830,10 @@ class RouterUpdateManager:
                         self._set(index, state='skipped', message='Роутер удалён из Hub')
                         continue
                     self._update_one(index, current, command, password, job_id)
-                    with self.lock:
-                        # Do not start a second installation while the first may
-                        # still be running behind a disconnected SSH tunnel.
-                        if self.job['items'][index]['state'] == 'unknown':
-                            self.job['cancel_requested'] = True
                 except Exception as exc:
-                    self._set(index, state='error', message=self._ssh_error(exc, password))
+                    cancelled = self.cancel_event.is_set()
+                    self._set(index, state='cancelled' if cancelled else 'error',
+                              message='Остановлено до отправки команды установки' if cancelled else self._ssh_error(exc, password))
         finally:
             password = ''
             command = ''
@@ -14610,67 +14846,151 @@ class RouterUpdateManager:
             self._set(index, state='skipped', message='SSH-туннель не настроен')
             return
         task_id = job_id + '-' + str(index)
-        self._set(index, state='connecting', message='Подключаюсь по SSH')
-        ready = self._ssh(row, "printf 'OWRT_UPDATE_READY=1\\n'\n", password)
-        if 'OWRT_UPDATE_READY=1' not in ready.splitlines():
+        with self.lock:
+            if self.cancel_event.is_set() or self.stopping.is_set():
+                self.job['items'][index].update(state='skipped', message='Пропущен: очередь остановлена')
+                return
+            self.job['items'][index].update(state='connecting', message='Подключаюсь по SSH')
+        try:
+            fields = router_update_fields(self._ssh(row, router_update_preflight_script(), password))
+        except Exception as exc:
+            cancelled = self.cancel_event.is_set()
+            self._set(index, state='cancelled' if cancelled else 'error',
+                      message=('Остановлено до отправки команды установки' if cancelled else
+                               self._ssh_error(exc, password) + '. Команда обновления не запускалась.'))
+            return
+        self._set(index, name=router_update_name(row, fields.get('NAME', '')))
+        if fields.get('STATE') == 'not_started':
+            self._set(index, state='error', message=self._safe(fields.get('ERROR'), password)
+                      or 'Подготовка роутера не пройдена. Команда обновления не запускалась.')
+            return
+        if fields.get('READY') != '1':
             raise RuntimeError('SSH не подтвердил готовность. Команда обновления не отправлена.')
+        if self.cancel_event.is_set() or self.stopping.is_set():
+            self._set(index, state='cancelled', message='Остановлено до отправки команды установки')
+            return
         launched = False
         launch_error = ''
+        started = time.monotonic()
+        hard_deadline = started + self.ROUTER_TIMEOUT
         try:
-            fields = router_update_fields(self._ssh(row, router_update_launch_script(task_id, command), password))
+            fields = router_update_fields(self._ssh(row, router_update_launch_script(task_id, command, self.ROUTER_TIMEOUT), password))
+            if fields.get('STATE') == 'not_started':
+                self._set(index, state='error', message=self._safe(fields.get('ERROR'), password)
+                          or 'Не удалось подготовить задачу на роутере. Команда обновления не запускалась.')
+                return
             launched = fields.get('STARTED') == '1'
             if fields.get('NAME', '').strip():
-                name = re.sub(r'[\x00-\x1f\x7f]', ' ', fields['NAME']).strip()[:200]
-                self._set(index, name=name)
+                self._set(index, name=router_update_name(row, fields['NAME']))
         except Exception as exc:
             # SSH can close after the detached task was accepted. Poll its known
             # ID instead of executing the installation a second time.
             launch_error = self._ssh_error(exc, password)
         self._set(index, state='running', message='Установка выполняется' if launched else 'Проверяю, запустилась ли установка')
-        deadline = time.monotonic() + (self.ROUTER_TIMEOUT if launched else 40)
         last_error = launch_error
-        missing = 0
-        while time.monotonic() < deadline and not self.stopping.is_set():
+        last_contact = time.monotonic()
+        last_progress = last_contact
+        previous_output = ''
+        stop_reason = ''
+        stop_deadline = None
+        cancel_delivered = False
+        timeout_reason = 'Превышено время установки (' + str(self.ROUTER_TIMEOUT) + ' с)'
+        while not self.stopping.is_set():
+            now = time.monotonic()
+            if self.cancel_event.is_set():
+                stop_reason = 'Остановка пользователем'
+            elif now - last_contact >= self.CONNECTION_TIMEOUT and not stop_reason:
+                stop_reason = 'SSH не отвечает ' + str(self.CONNECTION_TIMEOUT) + ' с: ' + (last_error or 'связь потеряна')
+            elif not launched and now - started >= self.LAUNCH_TIMEOUT and not stop_reason:
+                stop_reason = 'Запуск не подтверждён: ' + (launch_error or 'нет ответа задачи')
+            elif launched and not stop_reason and now - last_progress >= self.SILENCE_TIMEOUT:
+                stop_reason = 'Нет нового вывода установщика ' + str(self.SILENCE_TIMEOUT) + ' с; задача зависла или ожидает ввода'
+            elif now >= hard_deadline and not stop_reason:
+                stop_reason = timeout_reason
+            if stop_reason and stop_deadline is None:
+                stop_deadline = now + self.STOP_TIMEOUT
+            if stop_reason and not cancel_delivered:
+                try:
+                    response = self._ssh(row, router_update_cancel_script(task_id), password)
+                    cancel_delivered = 'OWRT_UPDATE_CANCEL=1' in response.splitlines()
+                except Exception as exc:
+                    last_error = self._ssh_error(exc, password)
+            if stop_reason and (time.monotonic() >= stop_deadline or not cancel_delivered):
+                self._set(index, state='unknown', message=stop_reason + '. Результат и остановка не подтверждены'
+                          + (': ' + last_error if last_error else '')
+                          + '; после восстановления связи проверь роутер. Очередь продолжает работу.')
+                return
             try:
                 fields = router_update_fields(self._ssh(row, router_update_poll_script(task_id), password))
-                self._set(index, output=self._safe(fields.get('OUTPUT', ''), password))
+                now = time.monotonic()
+                elapsed = int(now - started)
+                output = self._safe(fields.get('OUTPUT', ''), password)
+                if fields.get('OUTPUT', '') != previous_output:
+                    previous_output = fields.get('OUTPUT', '')
+                    last_progress = now
+                self._set(index, output=output, elapsed_seconds=elapsed)
                 state = fields.get('STATE')
+                if self.cancel_event.is_set() and not stop_reason:
+                    continue
+                if state in {'done', 'running', 'starting', 'dead', 'missing'}:
+                    last_contact = now
                 if state == 'done':
                     rc = fields.get('RC', '')
                     if not re.fullmatch(r'\d{1,3}', rc):
                         raise RuntimeError('Роутер вернул некорректный результат установки')
-                    self._set(index, state='success' if rc == '0' else 'error',
-                              message='Установка успешно завершена, rc=0' if rc == '0' else 'Ошибка установки, rc=' + rc)
+                    reason = fields.get('REASON', '')
+                    if reason == 'cancelled':
+                        final_state = 'cancelled' if self.cancel_event.is_set() else 'error'
+                        message = (stop_reason or 'Задача остановлена') + '; остановка на роутере подтверждена, rc=' + rc
+                    elif reason == 'timeout':
+                        final_state, message = 'error', timeout_reason + '; установщик остановлен на роутере, rc=' + rc
+                    else:
+                        final_state = 'success' if rc == '0' else 'error'
+                        message = 'Установка успешно завершена, rc=0' if rc == '0' else 'Ошибка установки, rc=' + rc
+                        if rc != '0':
+                            lines = [line.strip() for line in output.splitlines()
+                                     if line.strip() and 'строка с ключом или паролем скрыта' not in line]
+                            message += '. Последний вывод: ' + (' / '.join(lines[-3:])[-500:] if lines else 'установщик не передал описание ошибки')
+                    self._set(index, state=final_state, message=message)
                     try:
                         self._ssh(row, router_update_poll_script(task_id, cleanup=True), password)
                     except Exception:
                         pass
                     return
-                if state in {'running', 'starting'} and not launched:
+                if state == 'running' and not launched:
                     launched = True
-                    deadline = time.monotonic() + self.ROUTER_TIMEOUT
-                if state == 'missing':
-                    missing += 1
-                    if not launched and missing < 3:
-                        self.stopping.wait(self.POLL_SECONDS)
-                        continue
+                if state == 'dead':
+                    self._set(index, state='error', message='Процесс установки завершился без итогового кода; возможна ошибка запуска. Очередь продолжает работу.')
+                    return
+                if state == 'starting' and now - started >= self.LAUNCH_TIMEOUT:
+                    stop_reason = 'Задача установки не запустилась: ' + (launch_error or 'нет процесса установщика')
+                elif state == 'missing' and not launched and now - started >= self.LAUNCH_TIMEOUT:
+                    stop_reason = 'Задача установки не запустилась: ' + (launch_error or 'нет процесса установщика')
+                if state == 'missing' and launched:
                     self._set(index, state='unknown' if launched else 'error',
                               message=('Результат установки потерян: временные файлы отсутствуют. Успех не подтверждён.'
                                        if launched else launch_error or 'Установка не запущена'))
                     return
-                if state not in {'running', 'starting'}:
+                if state not in {'running', 'starting', 'missing'}:
                     raise RuntimeError('Не получен статус установки от роутера')
-                self._set(index, message='Установка выполняется; ожидаю итоговый код')
+                message = (stop_reason + '; ожидаю подтверждение остановки' if stop_reason else
+                           'Установка выполняется: ' + str(elapsed) + ' с; без нового вывода '
+                           + str(int(now - last_progress)) + ' с; лимит ' + str(self.ROUTER_TIMEOUT) + ' с')
+                self._set(index, message=message)
             except Exception as exc:
                 last_error = self._ssh_error(exc, password)
-                self._set(index, message='SSH временно недоступен; ожидаю результат установки')
-            self.stopping.wait(self.POLL_SECONDS)
+                self._set(index, message='Нет ответа по SSH: ' + last_error + '; ожидание не более '
+                          + str(self.CONNECTION_TIMEOUT) + ' с')
+            self.wake.wait(min(self.POLL_SECONDS, 1) if stop_reason else self.POLL_SECONDS)
+            self.wake.clear()
         self._set(index, state='unknown',
                   message='Результат не подтверждён: '
                           + (last_error or 'истекло время ожидания'))
 
     def stop(self):
         self.stopping.set()
+        self.wake.set()
+        self._interrupt_transport()
         thread = self.thread
         if thread and thread.ident is not None and thread is not threading.current_thread():
             thread.join(timeout=25)
@@ -16403,6 +16723,8 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
                     manager.start(payload.get('command'), payload.get('ssh_password', ''), payload.get('request_id'))
                 elif action == 'cancel':
                     manager.cancel(payload.get('id'))
+                elif action == 'refresh':
+                    manager.clear_finished(payload.get('id', ''))
             except ValueError as exc:
                 self.send_json(400, {'ok': False, 'error': str(exc)})
                 return
@@ -16410,10 +16732,8 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
                 self.send_json(409, {'ok': False, 'error': str(exc)})
                 return
         job = manager.snapshot()
-        routers = []
-        if not job:
-            with self.app.conn() as conn:
-                routers = [{'id': row['id'], 'name': row['name']} for row in list_router_rows(conn)]
+        with self.app.conn() as conn:
+            routers = [router_update_status(dict(row)) for row in list_router_rows(conn)]
         self.send_json(200, {'ok': True, 'job': job, 'routers': routers})
 
     def ssh_ws(self):
@@ -18007,7 +18327,7 @@ exit 127
 
     def do_POST(self):
         path = self.parsed().path
-        if path in {'/api/router-updates/start', '/api/router-updates/cancel'}:
+        if path in {'/api/router-updates/start', '/api/router-updates/cancel', '/api/router-updates/refresh'}:
             self.router_updates_api(path.rsplit('/', 1)[-1])
             return
         if path == "/login":

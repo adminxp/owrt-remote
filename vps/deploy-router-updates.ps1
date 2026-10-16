@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-v117
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-control-v117
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 
@@ -63,6 +63,15 @@ required = (
     "def router_updates_api(self, action=''):",
     "X-Router-Update-CSRF",
     "router_update_launch_script",
+    "def normalize_router_update_command(command):",
+    "def router_update_cancel_script(task_id):",
+    "def router_update_preflight_script():",
+    "OWRT_UPDATE_NAME_TEXT=",
+    "OWRT_UPDATE_OUTPUT_TEXT=",
+    "refreshRouters",
+    "queue-dashboard",
+    "def clear_finished(self, job_id):",
+    "\u041e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c \u0432\u0441\u0451",
     "routerUpdatesGroup",
     "app.router_updates.stop()",
 )
