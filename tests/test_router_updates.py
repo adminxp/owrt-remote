@@ -39,6 +39,7 @@ class UpdatesTests(unittest.TestCase):
         self.manager.LAUNCH_TIMEOUT = .01
         self.manager.SILENCE_TIMEOUT = .015
         self.manager.STOP_TIMEOUT = .01
+        self.manager.REBOOT_TIMEOUT = .025
         hub.save_auth_state({'username': 'owner', 'password': hub.password_digest('hub-password')})
         hub.save_sessions([])
         with self.app.conn() as conn:
@@ -53,6 +54,101 @@ class UpdatesTests(unittest.TestCase):
         self.manager.thread.join(timeout=3)
         self.assertFalse(self.manager.thread.is_alive())
         return self.manager.snapshot()
+
+    def test_reboot_requires_new_boot_and_runs_sequentially_without_installer(self):
+        calls, polls = [], {}
+        old_boot, new_boot = 'a' * 8 + '-1111-1111-1111-' + 'a' * 12, 'b' * 8 + '-2222-2222-2222-' + 'b' * 12
+        def ssh(row, script, password):
+            calls.append((row['id'], script, password))
+            if 'OWRT_UPDATE_READY=1' in script:
+                return 'OWRT_UPDATE_READY=1\nOWRT_UPDATE_BOOT_ID=' + old_boot + '\nOWRT_UPDATE_NAME_TEXT=АНТОН ВПН\n'
+            if 'OWRT_REBOOT_RUNNER' in script:
+                return 'OWRT_UPDATE_STARTED=1\n'
+            polls[row['id']] = polls.get(row['id'], 0) + 1
+            # Neither rc=0 nor the same working SSH session proves a reboot.
+            return 'OWRT_UPDATE_BOOT_ID=' + (old_boot if polls[row['id']] == 1 else new_boot) + '\nOWRT_UPDATE_RC=0\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            self.manager.start_reboot('shared-secret', 'request-reboot-success')
+            job = self.finish()
+        self.assertEqual(job['operation'], 'reboot')
+        self.assertEqual([item['state'] for item in job['items']], ['success', 'success'])
+        self.assertTrue(all(item['name'] == 'АНТОН ВПН' for item in job['items']))
+        self.assertEqual([row for row, _, _ in calls], ['main'] * 4 + ['node-2'] * 4)
+        self.assertTrue(all(password == 'shared-secret' for _, _, password in calls))
+        self.assertNotIn('shared-secret', json.dumps(job))
+        self.assertTrue(all('command.sh' not in script for _, script, _ in calls))
+
+    def test_reboot_disconnect_never_resends_and_only_new_boot_confirms_success(self):
+        launches, probes = [], 0
+        def ssh(row, script, password):
+            nonlocal probes
+            if 'OWRT_UPDATE_READY=1' in script:
+                return 'OWRT_UPDATE_READY=1\nOWRT_UPDATE_BOOT_ID=aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa\n'
+            if 'OWRT_REBOOT_RUNNER' in script:
+                launches.append(row['id'])
+                raise RuntimeError('Connection closed by remote host')
+            probes += 1
+            if probes == 1:
+                raise RuntimeError('SSH: нет ответа за 10 секунд')
+            return 'OWRT_UPDATE_BOOT_ID=bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            self.manager.start_reboot('', 'request-reboot-disconnect')
+            job = self.finish()
+        self.assertEqual(launches, ['main', 'node-2'])
+        self.assertTrue(all(item['state'] == 'success' for item in job['items']))
+
+    def test_reboot_unknown_or_rejected_continues_and_does_not_claim_success(self):
+        for failure in ['unchanged_boot', 'reboot_rc', 'wrong_password', 'missing_tool']:
+            with self.subTest(failure=failure):
+                launches = []
+                def ssh(row, script, password):
+                    if 'OWRT_UPDATE_READY=1' in script:
+                        if row['id'] == 'main' and failure == 'wrong_password':
+                            raise RuntimeError('root@127.0.0.1: Permission denied (publickey,password).')
+                        if row['id'] == 'main' and failure == 'missing_tool':
+                            return 'OWRT_UPDATE_STATE=not_started\nOWRT_UPDATE_ERROR=Нет reboot; перезагрузка не запускалась\n'
+                        return 'OWRT_UPDATE_READY=1\nOWRT_UPDATE_BOOT_ID=aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa\n'
+                    if 'OWRT_REBOOT_RUNNER' in script:
+                        launches.append(row['id'])
+                        return 'OWRT_UPDATE_STARTED=1\n'
+                    if row['id'] == 'main':
+                        return 'OWRT_UPDATE_BOOT_ID=aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa\nOWRT_UPDATE_RC=' + ('1' if failure == 'reboot_rc' else '0') + '\nOWRT_UPDATE_OUTPUT_TEXT=\nreboot denied'
+                    return 'OWRT_UPDATE_BOOT_ID=bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb\n'
+                with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+                    self.manager.start_reboot('shared-secret', 'request-reboot-' + failure)
+                    job = self.finish()
+                self.assertEqual(job['items'][0]['state'], 'unknown' if failure == 'unchanged_boot' else 'error')
+                self.assertEqual(job['items'][1]['state'], 'success')
+                self.assertEqual(launches, ['node-2'] if failure in {'wrong_password', 'missing_tool'} else ['main', 'node-2'])
+                if failure == 'wrong_password':
+                    self.assertIn('Общий SSH-пароль не принят', job['items'][0]['message'])
+                if failure == 'reboot_rc':
+                    self.assertIn('rc=1', job['items'][0]['message'])
+
+    def test_reboot_cancel_duplicate_and_conflicting_queue(self):
+        entered, release = threading.Event(), threading.Event()
+        launches = []
+        def ssh(row, script, password):
+            if 'OWRT_UPDATE_READY=1' in script:
+                return 'OWRT_UPDATE_READY=1\nOWRT_UPDATE_BOOT_ID=aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa\n'
+            if 'OWRT_REBOOT_RUNNER' in script:
+                launches.append(row['id']); entered.set(); release.wait(2)
+                return 'OWRT_UPDATE_STARTED=1\n'
+            return 'OWRT_UPDATE_BOOT_ID=aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa\n'
+        with mock.patch.object(self.manager, '_ssh', side_effect=ssh):
+            task = self.manager.start_reboot('', 'request-reboot-cancel')
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(task, self.manager.start_reboot('', 'request-reboot-cancel'))
+            with self.assertRaises(RuntimeError):
+                self.manager.start('echo installer', '', 'request-update-conflict')
+            with self.assertRaises(ValueError):
+                self.manager.start('echo installer', '', 'request-reboot-cancel')
+            self.manager.cancel(task)
+            release.set()
+            job = self.finish()
+        self.assertEqual(launches, ['main'])
+        self.assertEqual([item['state'] for item in job['items']], ['unknown', 'skipped'])
+        self.assertIn('reboot не отменяется', job['items'][0]['message'])
 
     def test_sequential_names_failures_and_no_password_in_snapshot(self):
         calls = []
@@ -407,6 +503,12 @@ class UpdatesTests(unittest.TestCase):
             payload = {'command': 'echo install', 'ssh_password': '', 'request_id': 'request-1234567897'}
             self.assertEqual(request('/api/router-updates/start', payload)[0], 403)
             self.assertEqual(request('/api/router-updates/refresh', {'id': ''})[0], 403)
+            reboot_payload = {'ssh_password': '', 'request_id': 'request-api-reboot'}
+            self.assertEqual(request('/api/router-updates/reboot', reboot_payload, cookie='')[0], 401)
+            self.assertEqual(request('/api/router-updates/reboot', reboot_payload)[0], 403)
+            with mock.patch.object(hub.Handler, 'current_account_profile', return_value={'is_owner': False}):
+                self.assertEqual(request('/api/router-updates/reboot', reboot_payload, csrf=self.manager.csrf)[0], 403)
+            self.assertEqual(request('/api/router-updates/reboot', reboot_payload, csrf=self.manager.csrf, origin='https://attacker.example')[0], 403)
             status, body = request('/api/router-updates')
             self.assertEqual(status, 200)
             self.assertIn('online', json.loads(body)['routers'][0])
@@ -434,11 +536,50 @@ class UpdatesTests(unittest.TestCase):
             self.assertIsNone(data['job'])
             self.assertFalse(data['routers'][0]['online'])
             self.assertEqual(data['routers'][0]['name'], 'АНТОН ВПН')
+            def reboot_ssh(row, script, password):
+                if 'OWRT_UPDATE_READY=1' in script:
+                    return 'OWRT_UPDATE_READY=1\nOWRT_UPDATE_BOOT_ID=aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa\n'
+                if 'OWRT_REBOOT_RUNNER' in script:
+                    return 'OWRT_UPDATE_STARTED=1\n'
+                return 'OWRT_UPDATE_BOOT_ID=bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb\n'
+            with mock.patch.object(self.manager, '_ssh', side_effect=reboot_ssh):
+                status, body = request('/api/router-updates/reboot', reboot_payload, csrf=self.manager.csrf)
+                self.assertEqual(status, 200)
+                self.assertTrue(all(item['state'] == 'success' for item in self.finish()['items']))
+            self.assertEqual(json.loads(request('/api/router-updates')[1])['job']['operation'], 'reboot')
         finally:
             server.shutdown(); server.server_close(); thread.join(3)
 
 
 class RouterTaskTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'fixture uses bundled Windows POSIX shell')
+    def test_detached_reboot_receipt_single_execution_and_busybox_syntax(self):
+        # Fake reboot only: this test never reboots any host or contacts routers.
+        shell = r'C:\Program Files\Git\usr\bin\sh.exe'
+        busybox = ROOT / '.test-output/busybox/busybox64.exe'
+        with tempfile.TemporaryDirectory(prefix='owrt-reboot-shell-') as folder:
+            root = Path(folder)
+            task = root / 'task'
+            env = {**os.environ, 'PATH': folder + os.pathsep + str(Path(shell).parent) + os.pathsep + os.environ['PATH']}
+            root.joinpath('setsid').write_text('#!/usr/bin/perl\nuse POSIX (); POSIX::setsid() >= 0 or die; exec @ARGV; die;\n', encoding='ascii', newline='\n')
+            root.joinpath('reboot').write_text('#!/bin/sh\necho run >>"' + root.as_posix() + '/runs"\necho fake-reboot-error\nexit 7\n', encoding='ascii', newline='\n')
+            script = hub.router_reboot_launch_script('fixture', delay=0).replace('/tmp/owrt-remote-reboot-fixture', task.as_posix())
+            for _ in range(2):
+                result = subprocess.run([shell], input=script, capture_output=True, encoding='utf-8', env=env, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('OWRT_UPDATE_STARTED=1', result.stdout)
+            deadline = time.monotonic() + 5
+            while not (task / 'result').exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertEqual((task / 'result').read_text().strip(), '7')
+            self.assertEqual((task / 'output').read_text().strip(), 'fake-reboot-error')
+            self.assertEqual(root.joinpath('runs').read_text().splitlines(), ['run'])
+            runner = hub.router_reboot_launch_script('fixture').split("<<'OWRT_REBOOT_RUNNER'\n", 1)[1].split('\nOWRT_REBOOT_RUNNER', 1)[0]
+            for source in [hub.router_reboot_probe_script(), hub.router_reboot_probe_script('fixture'), script, runner]:
+                root.joinpath('syntax.sh').write_text(source, encoding='utf-8', newline='\n')
+                result = subprocess.run([str(busybox), 'ash', '-n', str(root / 'syntax.sh')], capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(os.name == 'nt', 'fixture uses bundled Windows POSIX shell')
     def test_real_detached_task_failure_pipefail_bounded_output_and_cleanup(self):
         shell = r'C:\Program Files\Git\usr\bin\sh.exe'

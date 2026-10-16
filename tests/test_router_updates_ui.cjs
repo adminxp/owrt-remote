@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as state:
     out.joinpath('dashboard.html').write_text(hub.dashboard_html([],'owner',auth_bootstrap={'username':'owner','is_owner':True}),encoding='utf-8')
     print(hub.RAW_REPO_BASE)
 `], {env:{...process.env,PYTHONIOENCODING:'utf-8'},encoding:'utf-8'}).trim();
-let job = null, routers = [], starts = [], polls = 0;
+let job = null, routers = [], starts = [], reboots = [], polls = 0;
 function data() {return {ok:true,job,routers};}
 function send(res, data) {res.setHeader('Content-Type','application/json');res.end(JSON.stringify(data));}
 const server = http.createServer((req,res)=>{
@@ -37,6 +37,14 @@ const server = http.createServer((req,res)=>{
     let body='';req.on('data',data=>body+=data);req.on('end',()=>{
       const payload=JSON.parse(body);starts.push(payload);
       job={id:'test-task',request_id:payload.request_id,state:'running',cancel_requested:false,items:[{id:'node-5',name:'АНТОН ВПН',state:'running',message:'Установка выполняется',output:'one\ntwo'}]};
+      send(res,data());
+    });return;
+  }
+  if(url.pathname==='/api/router-updates/reboot') {
+    assert.equal(req.headers['x-router-update-csrf'],'test-csrf');
+    let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+      const payload=JSON.parse(body);reboots.push(payload);
+      job={id:'test-reboot',request_id:payload.request_id,operation:'reboot',state:'running',cancel_requested:false,items:[{id:'node-5',name:'АНТОН ВПН',state:'running',message:'Ожидаю новую загрузку и SSH',output:''}]};
       send(res,data());
     });return;
   }
@@ -229,6 +237,41 @@ const server = http.createServer((req,res)=>{
       assert.equal(layout.headerRow,true);
       assert.equal(layout.columns,4);
       await page.screenshot({path:path.join(root,'desktop-layout-'+width+'.png'),fullPage:true});
+      await page.close();
+    }
+    for(const width of [320,390,1280]) {
+      job=null;routers=[{id:'node-5',name:'АНТОН ВПН',online:true,last_seen:0,xray:'running'}];
+      const page=await browser.newPage({viewport:{width,height:900},isMobile:width<680,hasTouch:width<680});
+      await page.goto(`http://127.0.0.1:${server.address().port}/router-updates/`);
+      await page.waitForFunction(()=>!document.querySelector('#rebootAll').disabled);
+      assert.equal(await page.locator('#rebootAll').textContent(),'Перезапустить все роутера');
+      assert.equal(await page.locator('#rebootAll').evaluate(node=>getComputedStyle(node).backgroundColor),'rgb(185, 28, 28)');
+      // Reboot uses only the password, never the update command or its validation.
+      await page.locator('#command').fill('');
+      await page.locator('#sshPassword').fill('reboot-secret');
+      const updateCount=starts.length;
+      await page.locator('#rebootAll').click();
+      await page.waitForFunction(()=>document.getElementById('status').textContent==='Перезапуск выполняется');
+      assert.equal(reboots.at(-1).ssh_password,'reboot-secret');
+      assert.equal(Object.hasOwn(reboots.at(-1),'command'),false);
+      assert.equal(starts.length,updateCount);
+      assert.equal(await page.locator('#sshPassword').inputValue(),'');
+      assert.equal(await page.locator('#rebootAll').isDisabled(),true);
+      assert.equal(await page.locator('#start').isDisabled(),true);
+      assert.equal(await page.locator('#activeLabel').textContent(),'Перезапускаются');
+      await page.reload();
+      await page.waitForFunction(()=>document.getElementById('status').textContent==='Перезапуск выполняется');
+      assert.equal(await page.locator('#rebootAll').isDisabled(),true);
+      const rebootCount=reboots.length;
+      await page.locator('#cancel').click();
+      await page.waitForFunction(()=>document.getElementById('status').textContent==='Очередь перезапуска завершена');
+      assert.equal(reboots.length,rebootCount);
+      job.items[0].state='success';job.items[0].message='Роутер успешно перезагружен: новая загрузка и SSH подтверждены';
+      await page.waitForFunction(()=>document.querySelector('.router strong').textContent==='Успешно — АНТОН ВПН');
+      assert.equal(await page.locator('#countSuccess').textContent(),'1');
+      assert.equal(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage}).includes('reboot-secret')),false);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:path.join(root,'reboot-'+width+'.png'),fullPage:true});
       await page.close();
     }
     job=null;routers=[];
