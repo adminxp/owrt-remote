@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-mobile-v117
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-desktop-width-v117
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 

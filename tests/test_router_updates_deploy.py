@@ -21,7 +21,7 @@ class RouterUpdatesDeployTests(unittest.TestCase):
         self.target = self.root / 'hub.py'
         self.previous = b'print("previous Hub")\n'
         self.target.write_bytes(self.previous)
-        self.backup = self.root / 'hub.py.bak-before-router-updates-mobile-v117'
+        self.backup = self.root / 'hub.py.bak-before-router-updates-desktop-width-v117'
         source = (ROOT / 'vps/deploy-router-updates.ps1').read_text(encoding='utf-8')
         self.script = source.split("$RemoteScript = @'\n", 1)[1].split("\n'@", 1)[0]
         self.script = self.script.replace('/opt/owrt-remote/owrt-remote-hub.py', self.target.as_posix())

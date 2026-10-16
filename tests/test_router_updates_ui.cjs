@@ -214,6 +214,23 @@ const server = http.createServer((req,res)=>{
       await page.screenshot({path:path.join(root,'mobile-layout-'+viewport.width+'.png'),fullPage:true});
       assert.deepEqual(errors,[]);await page.close();
     }
+    // Mobile wrapping rules must preserve the original centered desktop column.
+    job=null;routers=[{id:'node-5',name:'АНТОН ВПН',online:true,last_seen:0,xray:'running'}];
+    for(const width of [1280,1440,1920]) {
+      const page=await browser.newPage({viewport:{width,height:900}});
+      await page.goto(`http://127.0.0.1:${server.address().port}/router-updates/`);
+      await page.waitForFunction(()=>!document.querySelector('#start').disabled);
+      const layout=await page.evaluate(()=>{const wrap=document.querySelector('.wrap').getBoundingClientRect(),input=document.querySelector('#sshPassword').getBoundingClientRect(),start=document.querySelector('#start').getBoundingClientRect(),cancel=document.querySelector('#cancel').getBoundingClientRect(),refresh=document.querySelector('#refreshRouters').getBoundingClientRect(),back=document.querySelector('.head-actions a').getBoundingClientRect();return {left:wrap.left,right:wrap.right,width:wrap.width,viewport:innerWidth,inputWidth:input.width,inputFont:getComputedStyle(document.querySelector('#sshPassword')).fontSize,actionRow:Math.abs(start.top-cancel.top)<1,headerRow:Math.abs(refresh.top-back.top)<1,columns:getComputedStyle(document.querySelector('.metrics')).gridTemplateColumns.split(' ').length};});
+      assert.equal(layout.width,1100,JSON.stringify(layout));
+      assert.ok(Math.abs(layout.left-(width-layout.right))<1,JSON.stringify(layout));
+      assert.equal(layout.inputWidth,480);
+      assert.equal(layout.inputFont,'14px');
+      assert.equal(layout.actionRow,true);
+      assert.equal(layout.headerRow,true);
+      assert.equal(layout.columns,4);
+      await page.screenshot({path:path.join(root,'desktop-layout-'+width+'.png'),fullPage:true});
+      await page.close();
+    }
     job=null;routers=[];
     const dashboard=await browser.newPage();
     await dashboard.goto(`http://127.0.0.1:${server.address().port}/`);
@@ -222,6 +239,6 @@ const server = http.createServer((req,res)=>{
     assert.equal(await link.getAttribute('href'),'/router-updates/');
     assert.match(await link.getAttribute('rel'),/noopener/);
     await dashboard.close();
-    console.log('Router updates desktop/mobile dashboard, outcome lists, 320/360/390/430px and landscape layouts, live statuses, refresh, polling, reload, privacy and new-tab link: PASS');
+    console.log('Router updates desktop/mobile dashboard, centered desktop widths, outcome lists, 320/360/390/430px and landscape layouts, live statuses, refresh, polling, reload, privacy and new-tab link: PASS');
   } finally {await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});
