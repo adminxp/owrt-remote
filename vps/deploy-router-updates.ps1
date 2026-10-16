@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-desktop-width-v117
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-router-updates-form-style-v117
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 
@@ -73,6 +73,8 @@ required = (
     "queueOutcomePanel",
     "function renderOutcomes(){",
     "grid-template-columns:minmax(0,1fr)",
+    "form-hint action-hint",
+    ".primary{background:#15803d;",
     "def clear_finished(self, job_id):",
     "\u041e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c \u0432\u0441\u0451",
     "routerUpdatesGroup",
