@@ -256,15 +256,9 @@ owrt-remote status
 
 </div>
 
-```mermaid
-flowchart LR
-    U[User Browser] -->|HTTPS 443| N[nginx on VPS]
-    N --> H[OpenWrt Remote Hub]
-    H --> X[Xray Reverse]
-    X --> R[OpenWrt Router]
-    R --> L[LuCI]
-    R --> S[SSH / Dropbear]
-```
+<p align="center">
+  <img src="assets/screenshots/scheme.svg" alt="Схема работы OpenWrt Remote Hub" width="900">
+</p>
 
 <div align="center">
 
@@ -420,15 +414,20 @@ flowchart LR
 
 <div align="center">
 
-<h2> Видео-демо</h2>
+<h2> Интро</h2>
 
-<b>Видео дизайн обзор</b>
-<br>
-<sub>Открытие Hub с телефона: статус роутера, LuCI и SSH Web Terminal.</sub>
+<a href="https://www.youtube.com/watch?v=QLBEj4KeOkM" target="_blank">
+  <img src="https://img.youtube.com/vi/QLBEj4KeOkM/maxresdefault.jpg"
+       alt="OpenWrt Remote Hub — Интро"
+       width="720">
+</a>
 
 <br><br>
 
-<video src="https://github.com/user-attachments/assets/f7990b3c-2cfe-4fbf-bb01-c846102e1c94" width="360" controls></video>
+<a href="https://www.youtube.com/watch?v=QLBEj4KeOkM">
+  <img alt="Смотреть интро на YouTube"
+       src="https://img.shields.io/badge/Смотреть-Интро%20на%20YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white">
+</a>
 
 </div>
 
