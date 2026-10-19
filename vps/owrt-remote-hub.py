@@ -36,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -72,6 +73,7 @@ except Exception:
 APP_NAME = "OpenWrt Remote Hub"
 RAW_REPO_BASE = os.environ.get("RAW_REPO_BASE", "https://raw.githubusercontent.com/kzolotarev95/luci-app-owrt-remote/main").rstrip("/")
 APP_DIR = Path(__file__).resolve().parent
+HUB_LOADED_REVISION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 STATIC_DIR = APP_DIR / "static"
 BRAND_THEME_COLOR = "#24192f"
 FAVICON_ICO_FILE = STATIC_DIR / "favicon.ico"
@@ -4964,17 +4966,24 @@ def parse_resize_payload(payload):
     return message.get("rows"), message.get("cols")
 
 
-def vps_resource_widgets_html(mobile=False):
+def vps_resource_widgets_html(mobile=False, resources=None):
     kind = "mobile" if mobile else "desktop"
-    widgets = "".join(
-        f'<div class="vpsResource badge" data-vps-resource="{key}" title="{label}: ожидаем данные VPS">'
-        f'<span>{label}</span><strong data-vps-resource-value>—</strong></div>'
-        for key, label in (("cpu", "ЦП"), ("memory", "ОЗУ"), ("disk", "ДИСК"))
-    )
-    return f'<div class="vpsResources vpsResources-{kind}" role="group" aria-label="Ресурсы VPS">{widgets}</div>'
+    widgets = []
+    for key, label in (("cpu", "ЦП"), ("memory", "ОЗУ"), ("disk", "ДИСК")):
+        metric = (resources or {}).get(key) or {}
+        percent = metric.get("percent")
+        valid = isinstance(percent, (int, float)) and not isinstance(percent, bool) and math.isfinite(percent)
+        value = (f"{percent:.1f}".rstrip("0").rstrip(".").replace(".", ",") + "%") if valid else "—"
+        title = html.escape(label + ": " + (value if valid else "данные пока недоступны"), quote=True)
+        widgets.append(
+            f'<div class="vpsResource badge" data-vps-resource="{key}" title="{title}" aria-label="{title}">'
+            f'<span>{label}</span><strong data-vps-resource-value>{value}</strong></div>'
+        )
+    return f'<div class="vpsResources vpsResources-{kind}" role="group" aria-label="Ресурсы VPS">{"".join(widgets)}</div>'
 
 
-def dashboard_html(routers, username, sessions=None, notifications=None, auth_bootstrap=None):
+
+def dashboard_html(routers, username, sessions=None, notifications=None, auth_bootstrap=None, vps_resources=None):
     routers_json = json.dumps(routers, ensure_ascii=False)
     sessions_json = json.dumps(sessions or [], ensure_ascii=False)
     notifications_json = json.dumps(notifications or [], ensure_ascii=False)
@@ -5058,16 +5067,78 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
 @media(min-width:681px) and (max-width:800px){{.vpsResource.badge{{padding:8px 2px;gap:2px}}.vpsResource.badge,.vpsResource strong{{font-size:10px}}}}
 @media(max-width:680px),(max-width:1024px) and (orientation:landscape) and (pointer:coarse){{.vpsResources-mobile{{display:grid;margin:8px 0 3px}}.vpsResource.badge{{padding:8px 6px;font-size:11px}}.vpsResource strong{{font-size:11px}}}}
 @media(min-width:681px) and (max-width:1024px) and (orientation:landscape) and (pointer:coarse){{.wrap{{padding-left:max(10px,env(safe-area-inset-left,0px));padding-right:max(10px,env(safe-area-inset-right,0px))}}.cards,.routerGroupCards,.toolbar{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+#routerUpdatesGroup .routerUpdatesLaunch{{display:flex;flex:0 1 auto;width:fit-content;min-width:0;max-width:100%;min-height:38px;margin:12px auto 0;padding:8px 14px;font-size:12px;line-height:1.3;white-space:normal;text-align:center;overflow-wrap:anywhere}}
+.desktopHeader{{--hdr-col-1:minmax(0,1fr);--hdr-col-2:minmax(0,1fr);--hdr-col-3:minmax(0,1.35fr);--hdr-col-4:minmax(0,1.25fr);--hdr-col-5:minmax(0,1fr);--hdr-col-6:minmax(0,1fr);--hdr-col-7:minmax(0,1fr);--hdr-col-8:minmax(0,1fr);width:100%;margin-left:0;grid-template-columns:minmax(0,1fr)}}
+.desktopHeaderTop,.desktopHeaderBottom{{min-width:0;max-width:100%}}
+.desktopHeaderTop>.routerSearchDock{{grid-column:4}}
+.desktopHeaderTop>.hubUpdateButton{{grid-column:3;grid-row:1}}
+#routerSearchToggle,.hubUpdateButton,#mobileRouterSearchToggle{{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:100%;min-width:0;min-height:36px;margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.06);color:#f3e8ff;font-size:12px;font-weight:800;line-height:1.25;white-space:normal;overflow-wrap:anywhere;cursor:pointer}}
+#routerSearchToggle[data-active="true"],#mobileRouterSearchToggle[data-active="true"]{{border-color:var(--cyan)}}
+.hubUpdateButton[data-update-state="current"]{{border-color:rgba(34,197,94,.65);background:rgba(34,197,94,.16);color:#bbf7d0}}
+.hubUpdateButton[data-update-state="available"]{{border-color:rgba(245,158,11,.7);background:rgba(245,158,11,.18);color:#fde68a}}
+.hubUpdateButton:disabled{{cursor:wait;opacity:.75}}
+.hubUpdateButton[hidden]{{display:none!important}}
+@media(min-width:681px) and (max-width:1100px){{.desktopHeaderTop{{grid-template-columns:repeat(4,minmax(0,1fr))}}.desktopHeaderTop>#seasonDock{{grid-column:1;grid-row:2}}.desktopHeaderTop>.vpsResources-desktop{{grid-column:2/span 3;grid-row:2}}}}
+.hubUpdateNotice{{box-sizing:border-box;width:min(100%,680px);max-width:100%;min-width:0;margin:12px auto 16px;padding:10px 14px;border:1px solid rgba(255,255,255,.10);border-radius:10px;background:transparent;color:#fff;font-size:12px;line-height:1.55;text-align:center;white-space:normal;overflow-wrap:anywhere}}
+.hubUpdateConfirm[hidden]{{display:none!important}}
+.hubUpdateConfirmOpen{{overflow:hidden}}
+.hubUpdateConfirm{{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:18px;background:rgba(7,4,15,.72);backdrop-filter:blur(8px)}}
+.hubUpdateConfirmCard{{box-sizing:border-box;width:min(100%,560px);max-height:min(88svh,620px);overflow:auto;padding:20px;border:1px solid rgba(245,158,11,.46);border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.055)),rgba(19,14,32,.97);box-shadow:0 24px 70px rgba(0,0,0,.48),0 0 0 1px rgba(245,158,11,.10);color:var(--text);text-align:left}}
+.hubUpdateConfirmTitle{{margin:0;color:#fde68a;font-size:18px;font-weight:900;line-height:1.25}}
+.hubUpdateConfirmLead{{margin:10px 0 0;color:#f7f2ff;font-size:14px;font-weight:750;line-height:1.45}}
+.hubUpdateConfirmMeta{{display:grid;gap:6px;margin:14px 0 0;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:rgba(0,0,0,.14);color:var(--muted);font-size:12px;line-height:1.4;overflow-wrap:anywhere}}
+.hubUpdateConfirmMeta strong{{color:#f3e8ff;font-weight:850}}
+.hubUpdateConfirmActions{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}}
+.hubUpdateConfirmActions button{{width:100%;min-width:0;min-height:42px}}
+.hubUpdateConfirmCancel{{background:rgba(255,255,255,.08);color:#f3e8ff}}
+.hubUpdateConfirmAccept{{background:var(--blue);color:#fff;box-shadow:0 10px 22px rgba(124,58,237,.24)}}
+@media(max-width:680px),(max-width:1024px) and (orientation:landscape) and (pointer:coarse){{#mobileHubUpdateDock,#mobileRouterSearchDock{{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;min-width:0}}#mobileHubUpdateDock>.mobileSearchVersion{{margin:0 auto;align-self:center}}#mobileRouterSearchToggle,.hubUpdateButton{{min-height:44px;padding:8px;font-size:11px}}#mobileRouterSearchToggle{{margin-top:8px;background:var(--blue);color:#fff;box-shadow:0 10px 22px rgba(124,58,237,.22)}}#mobileSeasonDock{{display:block;width:100%;min-width:0}}#mobileSeasonToggle{{min-height:44px;margin:8px 0 0}}.vpsResources-mobile{{margin:0 0 10px}}.hubUpdateNotice{{margin:0 auto 12px;padding:10px 12px;line-height:1.5}}}}
+@media(max-width:680px),(max-width:1024px) and (orientation:landscape) and (pointer:coarse){{
+  .wrap{{--mobile-control-gap:8px;display:flex;flex-direction:column;gap:var(--mobile-control-gap)}}
+  .top{{grid-template-columns:minmax(0,1fr);gap:var(--mobile-control-gap);padding:6px 0 0;border-bottom:0}}
+  #mobileHubUpdateDock,#mobileSeasonDock,#mobileRouterSearchDock{{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--mobile-control-gap);margin:0}}
+  #mobileRouterSearchToggle,#mobileSeasonToggle,#hubMenuToggle,.vpsResources-mobile{{margin:0}}
+  #mobileRouterSearchPanel,#mobileSeasonPanel{{margin:0}}
+  #hubMenuPanelHost{{display:contents}}
+  #hubMenuPanelHost>.headerActions,#mobileOwnerTools{{grid-column:1/-1;margin:0}}
+  #routerFormToggle,#routerGroupsToggle,#routerStatsToggle,#routerFormWrap,#routerGroupsPanel,#routerStats,#routerForm{{margin:0}}
+  #routerFormWrap>.formMsg,#routerGroupsPanel>.formMsg{{margin:var(--mobile-control-gap) 0 0}}
+  .hubUpdateNotice{{margin:0 auto 4px}}
+  .hubUpdateConfirm{{padding:12px;place-items:center}}
+  .hubUpdateConfirmCard{{width:100%;max-height:calc(100svh - 24px);padding:16px;border-radius:18px}}
+  .hubUpdateConfirmTitle{{font-size:17px}}
+  .hubUpdateConfirmLead{{font-size:14px}}
+  .hubUpdateConfirmMeta{{margin-top:12px;padding:10px;font-size:11px}}
+  .hubUpdateConfirmActions{{gap:8px;margin-top:14px}}
+  .hubUpdateConfirmActions button{{min-height:44px;padding:9px 8px;font-size:12px}}
+}}
 </style>
 </head>
 <body class="preload-mobile-panels">
 <canvas class="seasonalFx" id="seasonalFx" aria-hidden="true" hidden></canvas>
 <main class="wrap">
+  <div class="hubUpdateNotice" id="hubUpdateNotice" role="status" aria-live="polite" hidden></div>
+  <div class="hubUpdateConfirm" id="hubUpdateConfirm" hidden>
+    <section class="hubUpdateConfirmCard" role="dialog" aria-modal="true" aria-labelledby="hubUpdateConfirmTitle" aria-describedby="hubUpdateConfirmLead">
+      <h2 class="hubUpdateConfirmTitle" id="hubUpdateConfirmTitle">Обновление панели VPS</h2>
+      <p class="hubUpdateConfirmLead" id="hubUpdateConfirmLead">Действительно обновить панель до последней доступной сборки?</p>
+      <div class="hubUpdateConfirmMeta">
+        <div>Сборка: <strong id="hubUpdateConfirmVersion">—</strong></div>
+        <div>Источник: <strong id="hubUpdateConfirmSource">—</strong></div>
+        <div>После запуска Hub будет перезапущен, затем страница обновится автоматически.</div>
+      </div>
+      <div class="hubUpdateConfirmActions">
+        <button class="hubUpdateConfirmCancel" id="hubUpdateConfirmCancel" type="button">Отмена</button>
+        <button class="hubUpdateConfirmAccept primary" id="hubUpdateConfirmAccept" type="button">Обновить</button>
+      </div>
+    </section>
+  </div>
   <section class="top">
     <div class="brand">
       <div class="desktopHeader">
         <div class="desktopHeaderTop">
-          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v117</span></span></h1>
+          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v118</span></span></h1>
+          <button class="badge hubUpdateButton" data-hub-update type="button" {'hidden' if not is_owner else ''}>Обновление панели</button>
           <div class="routerSearchDock" id="routerSearchDock">
             <button class="routerSearchToggle" id="routerSearchToggle" type="button" aria-expanded="false" aria-controls="routerSearchPanel" data-active="false">
               <span>Поиск роутеров</span>
@@ -5103,17 +5174,11 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
                   <button class="seasonBtn" type="button" data-season-mode="prism" data-active="false" aria-pressed="false">&#1055;&#1088;&#1080;&#1079;&#1084;&#1072;</button>
                   <button class="seasonBtn" type="button" data-season-mode="pulse" data-active="false" aria-pressed="false">&#1055;&#1091;&#1083;&#1100;&#1089;</button>
                   <button class="seasonBtn" type="button" data-season-mode="laser" data-active="false" aria-pressed="false">&#1051;&#1091;&#1095;&#1080;</button>
-                  <button class="seasonBtn" type="button" data-season-mode="aurora" data-active="false" aria-pressed="false">Аврора</button>
-                  <button class="seasonBtn" type="button" data-season-mode="matrix" data-active="false" aria-pressed="false">Матрица</button>
-                  <button class="seasonBtn" type="button" data-season-mode="nebula" data-active="false" aria-pressed="false">Туманность</button>
-                  <button class="seasonBtn" type="button" data-season-mode="fireworks" data-active="false" aria-pressed="false">Фейерверк</button>
-                  <button class="seasonBtn" type="button" data-season-mode="vortex" data-active="false" aria-pressed="false">Вихрь</button>
-                  <button class="seasonBtn" type="button" data-season-mode="comet" data-active="false" aria-pressed="false">Кометы</button>
                 </div>
               </div>
             </section>
           </div>
-          {vps_resource_widgets_html()}
+          {vps_resource_widgets_html(resources=vps_resources)}
         </div>
         <div class="desktopHeaderBottom">
           <div class="links">
@@ -5373,7 +5438,7 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
                   <span class="authGroupChevron" aria-hidden="true">⌄</span>
                 </summary>
                 <div class="authGroupBody">
-                  <a class="sessionBtn btn" href="/router-updates/" target="_blank" rel="noopener noreferrer">Открыть терминал обновления</a>
+                  <a class="sessionBtn btn routerUpdatesLaunch" href="/router-updates/" target="_blank" rel="noopener noreferrer" title="Открыть терминал обновления">Терминал обновления</a>
                 </div>
               </details>
               <details class="authGroup" id="backupGroup">
@@ -5408,24 +5473,10 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
         </div>
       </div>
     </div>
-    <div class="mobileSearchDock" id="mobileRouterSearchDock">
-      <span class="mobileSearchVersion">v117</span>
-      <button class="routerSearchToggle mobilePanelToggle primary" id="mobileRouterSearchToggle" type="button" aria-expanded="false" aria-controls="mobileRouterSearchPanel" data-active="false">
-        <span>Поиск роутеров</span>
-      </button>
-      <section class="routerSearchPanel" id="mobileRouterSearchPanel" aria-label="Поиск роутеров" hidden>
-        <div class="routerSearchCard">
-          <div class="routerSearchHead">
-            <strong class="routerSearchTitle">Поиск по роутерам</strong>
-            <button class="routerSearchClear" id="mobileRouterSearchClear" type="button" disabled>Очистить</button>
-          </div>
-          <label class="routerSearchField" for="mobileRouterSearchInput">
-            <span class="routerSearchIcon" aria-hidden="true">⌕</span>
-            <input id="mobileRouterSearchInput" type="search" placeholder="Имя или router id" autocomplete="off" spellcheck="false">
-          </label>
-          <div class="routerSearchMeta" id="mobileRouterSearchMeta">Всего роутеров: 0</div>
-        </div>
-      </section>
+    {vps_resource_widgets_html(mobile=True, resources=vps_resources)}
+    <div class="mobileSearchDock" id="mobileHubUpdateDock">
+      <span class="mobileSearchVersion">v118</span>
+      <button class="badge hubUpdateButton" data-hub-update type="button" {'hidden' if not is_owner else ''}>Обновление панели</button>
     </div>
     <div class="mobileSearchDock" id="mobileSeasonDock" aria-label="Зимние эффекты">
       <button class="routerSearchToggle seasonToggle mobilePanelToggle primary" id="mobileSeasonToggle" type="button" aria-expanded="false" aria-controls="mobileSeasonPanel" data-open="false">
@@ -5444,17 +5495,28 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
             <button class="seasonBtn" type="button" data-season-mode="prism" data-active="false" aria-pressed="false">&#1055;&#1088;&#1080;&#1079;&#1084;&#1072;</button>
             <button class="seasonBtn" type="button" data-season-mode="pulse" data-active="false" aria-pressed="false">&#1055;&#1091;&#1083;&#1100;&#1089;</button>
             <button class="seasonBtn" type="button" data-season-mode="laser" data-active="false" aria-pressed="false">&#1051;&#1091;&#1095;&#1080;</button>
-            <button class="seasonBtn" type="button" data-season-mode="aurora" data-active="false" aria-pressed="false">Аврора</button>
-            <button class="seasonBtn" type="button" data-season-mode="matrix" data-active="false" aria-pressed="false">Матрица</button>
-            <button class="seasonBtn" type="button" data-season-mode="nebula" data-active="false" aria-pressed="false">Туманность</button>
-            <button class="seasonBtn" type="button" data-season-mode="fireworks" data-active="false" aria-pressed="false">Фейерверк</button>
-            <button class="seasonBtn" type="button" data-season-mode="vortex" data-active="false" aria-pressed="false">Вихрь</button>
-            <button class="seasonBtn" type="button" data-season-mode="comet" data-active="false" aria-pressed="false">Кометы</button>
           </div>
         </div>
       </section>
     </div>
-    {vps_resource_widgets_html(mobile=True)}
+    <div class="mobileSearchDock" id="mobileRouterSearchDock">
+      <button class="routerSearchToggle mobilePanelToggle primary" id="mobileRouterSearchToggle" type="button" aria-expanded="false" aria-controls="mobileRouterSearchPanel" data-active="false">
+        <span>Поиск роутеров</span>
+      </button>
+      <section class="routerSearchPanel" id="mobileRouterSearchPanel" aria-label="Поиск роутеров" hidden>
+        <div class="routerSearchCard">
+          <div class="routerSearchHead">
+            <strong class="routerSearchTitle">Поиск по роутерам</strong>
+            <button class="routerSearchClear" id="mobileRouterSearchClear" type="button" disabled>Очистить</button>
+          </div>
+          <label class="routerSearchField" for="mobileRouterSearchInput">
+            <span class="routerSearchIcon" aria-hidden="true">⌕</span>
+            <input id="mobileRouterSearchInput" type="search" placeholder="Имя или router id" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="routerSearchMeta" id="mobileRouterSearchMeta">Всего роутеров: 0</div>
+        </div>
+      </section>
+    </div>
     <button class="mobilePanelToggle primary" id="hubMenuToggle" type="button" hidden>Открыть меню хаба</button>
     <div id="hubMenuPanelHost"></div>
     <div class="mobileOwnerTools" id="mobileOwnerTools" hidden>
@@ -5601,7 +5663,7 @@ const openRouterGroups = new Set(['__ungrouped__']);
 let routerGroupsPanelOpen = false;
 let lastRouterSearchTrigger = null;
 const SEASON_EFFECT_KEY = 'owrtRemote:seasonEffectMode';
-const SEASON_EFFECT_MODES = new Set(['off', 'snow', 'rain', 'cosmos', 'embers', 'orbit', 'prism', 'pulse', 'laser', 'aurora', 'matrix', 'nebula', 'fireworks', 'vortex', 'comet']);
+const SEASON_EFFECT_MODES = new Set(['off', 'snow', 'rain', 'cosmos', 'embers', 'orbit', 'prism', 'pulse', 'laser']);
 let seasonEffectMode = 'off';
 let seasonalFxCtx = null;
 let seasonalFxFrame = 0;
@@ -11667,6 +11729,125 @@ syncRouterSearchToggleState();
   requestRouterRender();
 fillRouterForm(true);
 waitNotificationsLoop();
+function initHubUpdate() {{
+  const buttons = Array.from(document.querySelectorAll('[data-hub-update]')).filter(button => !button.hidden);
+  const notice = document.getElementById('hubUpdateNotice');
+  if (!buttons.length || !notice) return;
+  const confirmPanel = document.getElementById('hubUpdateConfirm');
+  const confirmLead = document.getElementById('hubUpdateConfirmLead');
+  const confirmVersion = document.getElementById('hubUpdateConfirmVersion');
+  const confirmSource = document.getElementById('hubUpdateConfirmSource');
+  const confirmCancel = document.getElementById('hubUpdateConfirmCancel');
+  const confirmAccept = document.getElementById('hubUpdateConfirmAccept');
+  let state = null, timer = null, loading = false, stopped = false, csrf = '', pending = '', deadline = 0;
+  let confirmResolve = null;
+  const active = job => job && ['starting', 'installing', 'restarting', 'rollback'].includes(job.status);
+  try {{ pending = sessionStorage.getItem('hub-update-pending') || ''; }} catch (_) {{}}
+  if (pending) deadline = Date.now() + 300000;
+  const message = (text, result = '') => {{
+    notice.hidden = !text; notice.textContent = text; notice.dataset.result = result;
+  }};
+  const closeConfirmation = (answer) => {{
+    if (!confirmPanel || !confirmResolve) return;
+    const resolve = confirmResolve;
+    confirmResolve = null;
+    confirmPanel.hidden = true;
+    document.body.classList.remove('hubUpdateConfirmOpen');
+    resolve(Boolean(answer));
+  }};
+  const askConfirmation = (candidate) => new Promise((resolve) => {{
+    if (!confirmPanel || !confirmLead || !confirmVersion || !confirmSource || !confirmCancel || !confirmAccept) {{
+      resolve(window.confirm('Действительно обновить панель VPS до ' + candidate.remote_version + '?'));
+      return;
+    }}
+    closeConfirmation(false);
+    confirmResolve = resolve;
+    confirmLead.textContent = 'Действительно обновить панель VPS до последней доступной сборки ' + candidate.remote_version + ' (' + candidate.remote_revision.slice(0, 8) + ')?';
+    confirmVersion.textContent = candidate.remote_version + ' · ' + candidate.remote_revision.slice(0, 8);
+    confirmSource.textContent = candidate.source || 'источник обновления';
+    confirmPanel.hidden = false;
+    document.body.classList.add('hubUpdateConfirmOpen');
+    confirmAccept.focus();
+  }});
+  if (confirmCancel) confirmCancel.addEventListener('click', () => closeConfirmation(false));
+  if (confirmAccept) confirmAccept.addEventListener('click', () => closeConfirmation(true));
+  if (confirmPanel) confirmPanel.addEventListener('click', (event) => {{ if (event.target === confirmPanel) closeConfirmation(false); }});
+  document.addEventListener('keydown', (event) => {{ if (event.key === 'Escape') closeConfirmation(false); }});
+  const remember = value => {{
+    pending = value;
+    try {{ if (value) sessionStorage.setItem('hub-update-pending', value); else sessionStorage.removeItem('hub-update-pending'); }} catch (_) {{}}
+  }};
+  const render = () => {{
+    if (!state) return;
+    const job = state.job || {{}}, busy = active(job);
+    buttons.forEach(button => {{
+      button.disabled = busy || state.checking;
+      button.dataset.available = state.available ? 'true' : 'false';
+      button.dataset.updateState = busy ? 'busy' : state.checking ? 'checking' : state.error ? 'error' : state.available ? 'available' : state.checked ? 'current' : 'checking';
+      button.textContent = busy ? 'Обновляется…' : state.checking ? 'Проверка…' : state.available ? 'Доступно обновление' : 'Обновление панели';
+      button.title = state.available ? 'Доступна сборка ' + state.remote_version + ' · ' + state.remote_revision.slice(0, 8) : state.error || 'Проверить обновление панели';
+    }});
+    if (busy) {{
+      if (!pending) {{ remember(job.id); deadline = Date.now() + 300000; }}
+      message(job.message);
+    }} else if (job.id === pending && ['succeeded', 'failed'].includes(job.status)) {{
+      remember('');
+      message(job.message, job.status);
+      if (job.status === 'succeeded') {{ stopped = true; setTimeout(() => window.location.reload(), 1500); }}
+    }} else if (state.error) message(state.error, 'failed');
+    else if (job.status === 'failed') message(job.message, 'failed');
+    else if (state.available) message('Доступно обновление панели: ' + state.remote_version + ' · сборка ' + state.remote_revision.slice(0, 8) + '.');
+    else if (state.checked && !state.checking) message('У вас последняя версия панели, обновление не требуется.', 'succeeded');
+    else if (state.checking) message('Проверяется наличие обновлений панели…');
+    else message('');
+  }};
+  const request = async (action = '', payload = {{}}) => {{
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 10000);
+    try {{
+      const options = {{cache: 'no-store', credentials: 'same-origin', signal: controller.signal}};
+      if (action) Object.assign(options, {{method: 'POST', headers: {{'Content-Type': 'application/json', 'X-Hub-Update-CSRF': csrf}}, body: JSON.stringify(payload)}});
+      const response = await fetch('/api/hub-update' + (action ? '/' + action : ''), options);
+      if (response.status === 401 || response.status === 403) stopped = true;
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Не удалось связаться с панелью.');
+      state = data; csrf = data.csrf; render();
+    }} finally {{ clearTimeout(timeout); }}
+  }};
+  const schedule = () => {{
+    clearTimeout(timer);
+    if (!stopped && !document.hidden) timer = setTimeout(load, pending || state?.checking || active(state?.job) ? 2000 : 60000);
+  }};
+  const failure = error => {{
+    if (pending && Date.now() < deadline) message('Панель перезапускается. Ожидается результат обновления…');
+    else message(pending ? 'Связь с панелью не восстановилась. Результат обновления не подтверждён; проверь сервис owrt-remote на VPS.' : error.message, 'failed');
+  }};
+  const load = async () => {{
+    if (loading || stopped || document.hidden) return;
+    loading = true;
+    try {{ await request(); }} catch (error) {{ failure(error); }}
+    finally {{ loading = false; schedule(); }}
+  }};
+  buttons.forEach(button => button.addEventListener('click', async () => {{
+    if (loading || active(state?.job)) return;
+    loading = true;
+    try {{
+      if (!state) await request();
+      if (state.available) {{
+        if (await askConfirmation(state)) {{
+          deadline = Date.now() + 300000;
+          await request('start', {{revision: state.remote_revision}});
+        }}
+      }} else {{
+        await request('check');
+      }}
+    }} catch (error) {{ failure(error); }}
+    finally {{ loading = false; schedule(); }}
+  }}));
+  document.addEventListener('visibilitychange', () => {{ clearTimeout(timer); if (!document.hidden) load(); }});
+  window.addEventListener('pagehide', () => clearTimeout(timer));
+  window.addEventListener('pageshow', load);
+  load();
+}}
 function initVpsResourceWidgets() {{
   const widgets = Array.from(document.querySelectorAll('[data-vps-resource]'));
   if (!widgets.length) return;
@@ -11701,7 +11882,8 @@ function initVpsResourceWidgets() {{
     if (stopped || document.hidden || request) return;
     const controller = new AbortController();
     request = controller;
-    const timeout = setTimeout(() => controller.abort(), 2500);
+    let timedOut = false;
+    const timeout = setTimeout(() => {{ timedOut = true; controller.abort(); }}, 2500);
     try {{
       const response = await fetch('/api/vps/resources', {{cache: 'no-store', signal: controller.signal}});
       if (response.status === 401 || response.status === 403) {{ stopped = true; clearInterval(timer); }}
@@ -11710,10 +11892,10 @@ function initVpsResourceWidgets() {{
       if (!data.ok) throw new Error('Invalid VPS resources');
       if (!document.hidden && !stopped) show(data);
     }} catch (error) {{
-      if (!document.hidden) show(null, true);
+      if (!document.hidden && (!controller.signal.aborted || timedOut)) show(null, true);
     }} finally {{
       clearTimeout(timeout);
-      request = null;
+      if (request === controller) request = null;
     }}
   }};
   const pause = () => {{
@@ -11721,10 +11903,10 @@ function initVpsResourceWidgets() {{
     if (request) request.abort();
   }};
   const resume = () => {{
-    pause();
-    if (stopped || document.hidden) return;
+    clearInterval(timer); timer = null;
+    if (stopped || document.hidden) {{ pause(); return; }}
     load();
-    timer = setInterval(load, 3000);
+    timer = setInterval(load, 1000);
   }};
   document.addEventListener('visibilitychange', resume);
   window.addEventListener('pagehide', pause);
@@ -11732,6 +11914,7 @@ function initVpsResourceWidgets() {{
   resume();
 }}
 initVpsResourceWidgets();
+initHubUpdate();
 setInterval(() => {{
   loadRouters({{automatic: true}}).catch(() => {{}});
 }}, 5000);
@@ -12944,7 +13127,7 @@ button:hover{{filter:brightness(1.06)}}
       <form class="login" method="post" action="/login">
     {error_html}
     <span class="brand">
-      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v117</span></span></h1>
+      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v118</span></span></h1>
     </span>
     <label for="hubUsername">Логин</label>
     <input id="hubUsername" name="username" autocomplete="off" autofocus required>
@@ -13416,7 +13599,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;background:li
                 <circle cx="65" cy="59" r="3" fill="#E5F2FF"/>
               </svg>
             </div>
-            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v117</span></h2>
+            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v118</span></h2>
           </div>
         </div>
         <div class="brandBottom">
@@ -14357,7 +14540,7 @@ def login_html(error=""):
 class VpsResourceMonitor:
     """Shared, nonblocking Linux samples; never spawn commands per browser poll."""
 
-    interval = 3.0
+    interval = 1.0
 
     def __init__(self, proc_dir="/proc", disk_path="/"):
         self.proc_dir = Path(proc_dir)
@@ -15169,6 +15352,243 @@ class RouterUpdateManager:
             thread.join(timeout=25)
 
 
+HUB_UPDATE_LIMIT = 4 * 1024 * 1024
+HUB_UPDATE_ACTIVE = {'starting', 'installing', 'restarting', 'rollback'}
+
+
+def hub_update_write(path, data, mode=0o600):
+    """One durable atomic replacement; never truncate a running Hub or its state."""
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def hub_update_state(directory, value=None):
+    path = Path(directory) / 'job.json'
+    if value is not None:
+        hub_update_write(path, json.dumps(value, ensure_ascii=False).encode('utf-8'))
+        return value
+    try:
+        with path.open('rb') as stream:
+            raw = stream.read(16385)
+        data = json.loads(raw) if len(raw) <= 16384 else {}
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@contextmanager
+def hub_update_lock(directory, blocking=False):
+    # The worker survives Hub restarts; the kernel releases this lock on a crash.
+    import fcntl
+    Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (Path(directory) / 'worker.lock').open('a') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise RuntimeError('Обновление панели уже выполняется.')
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def hub_update_validate(data):
+    if not 50000 <= len(data) <= HUB_UPDATE_LIMIT:
+        raise ValueError('Некорректный размер файла обновления панели.')
+    source = data.decode('utf-8')
+    if not all(marker in source for marker in ('class App:', 'class Handler(', 'def dashboard_html(', 'def main():')):
+        raise ValueError('Источник вернул файл, не похожий на панель Hub.')
+    if not all(marker in source for marker in ('class HubUpdateManager:', 'panel-update-worker', 'HUB_LOADED_REVISION')):
+        raise ValueError('Сборка в источнике ещё не поддерживает проверяемое обновление из панели.')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', SyntaxWarning)
+        compile(source, 'owrt-remote-hub.py', 'exec', dont_inherit=True)
+    return data
+
+
+def hub_update_version(data):
+    match = re.search(rb'appBannerVersion[^>]*>(v[0-9]+)', data)
+    return match[1].decode('ascii') if match else 'последняя сборка'
+
+
+def hub_update_health(url, revision, attempts=30):
+    for _ in range(attempts):
+        try:
+            with urllib.request.urlopen(url + '?panel-update=1', timeout=2) as response:
+                data = json.loads(response.read(4096))
+            if data.get('ok') and data.get('revision') == revision:
+                return True
+        except (OSError, ValueError):
+            pass
+        time.sleep(2)
+    return False
+
+
+def run_hub_update_worker(job_id, directory=None, target=None):
+    directory = Path(directory or STATE_DIR / 'panel-update')
+    target = Path(target or Path(__file__).resolve())
+    with hub_update_lock(directory, blocking=True):
+        job = hub_update_state(directory)
+        if job.get('id') != job_id or job.get('status') != 'starting':
+            raise RuntimeError('Задача обновления устарела или уже запущена.')
+        changed = False
+        previous = None
+        candidate = directory / 'candidate.py'
+        def report(status, message):
+            job.update(status=status, message=message, updated_at=time.time())
+            hub_update_state(directory, job)
+        try:
+            time.sleep(2)  # Give the initiating HTTP request time to return its job id.
+            data = hub_update_validate(candidate.read_bytes())
+            if hashlib.sha256(data).hexdigest() != job.get('revision'):
+                raise RuntimeError('Контрольная сумма обновления не совпала; файл не заменён.')
+            previous = target.read_bytes()
+            if hashlib.sha256(previous).hexdigest() != job.get('previous_revision'):
+                raise RuntimeError('Файл Hub изменился после подтверждения; обнови страницу.')
+            hub_update_write(directory / 'previous.py', previous, 0o700)
+            report('installing', 'Устанавливается новая сборка панели…')
+            hub_update_write(target, data, 0o755)
+            changed = True
+            report('restarting', 'Панель перезапускается; ожидается проверка новой сборки…')
+            subprocess.run(['systemctl', 'restart', 'owrt-remote'], check=True, capture_output=True, timeout=35)
+            if not hub_update_health(job['health_url'], job['revision']):
+                raise RuntimeError('Новая сборка не прошла проверку работоспособности.')
+            report('succeeded', 'Панель успешно обновлена. Страница будет перезагружена.')
+            return 0
+        except Exception as exc:
+            reason = str(exc)[:500]
+            if changed and previous is not None:
+                try:
+                    report('rollback', 'Ошибка обновления; восстанавливается предыдущая сборка…')
+                except OSError:
+                    pass  # A full state disk must not prevent recovery of the Hub file.
+                try:
+                    hub_update_write(target, previous, 0o755)
+                    subprocess.run(['systemctl', 'restart', 'owrt-remote'], check=True, capture_output=True, timeout=35)
+                    restored = hub_update_health(job['health_url'], job['previous_revision'], attempts=15)
+                    reason += ' Предыдущий файл восстановлен.' + ('' if restored else ' Работоспособность сервиса не подтверждена; проверь журнал owrt-remote на VPS.')
+                except Exception as rollback_exc:
+                    reason += ' Не удалось завершить откат: ' + str(rollback_exc)[:300]
+            report('failed', 'Обновление не выполнено: ' + reason)
+            return 1
+        finally:
+            candidate.unlink(missing_ok=True)
+
+
+class HubUpdateManager:
+    check_interval = 300
+
+    def __init__(self, target=None, directory=None, source=None):
+        self.target = Path(target or Path(__file__).resolve())
+        self.directory = Path(directory or STATE_DIR / 'panel-update')
+        self.source = (source or RAW_REPO_BASE).rstrip('/')
+        self.csrf = secrets.token_urlsafe(32)
+        self.lock = threading.Lock()
+        self.checked_at = 0
+        self.checking = False
+        self.error = ''
+        self.candidate = None
+        self.remote_revision = ''
+        self.remote_version = ''
+        self.health_url = 'http://127.0.0.1:8088/health'
+
+    def check(self, force=False):
+        with self.lock:
+            job = hub_update_state(self.directory)
+            if self.checking or job.get('status') in HUB_UPDATE_ACTIVE:
+                return
+            if self.checked_at and time.monotonic() - self.checked_at < (15 if force else self.check_interval):
+                return
+            self.checking = True
+        try:
+            threading.Thread(target=self._check, name='owrt-panel-update-check', daemon=True).start()
+        except Exception:
+            with self.lock:
+                self.checking = False
+            raise
+
+    def fetch_candidate(self):
+        if urllib.parse.urlsplit(self.source).scheme != 'https':
+            raise ValueError('Источник обновления должен использовать HTTPS.')
+        request = urllib.request.Request(self.source + '/vps/owrt-remote-hub.py', headers={
+            'User-Agent': 'OpenWrt-Remote-Hub-Updater', 'Cache-Control': 'no-cache'})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if urllib.parse.urlsplit(response.geturl()).scheme != 'https':
+                raise ValueError('Источник обновления должен использовать HTTPS.')
+            return response.read(HUB_UPDATE_LIMIT + 1)
+
+    def _check(self):
+        data, error = None, ''
+        try:
+            data = self.fetch_candidate()
+            hub_update_validate(data)
+        except Exception as exc:
+            error = 'Не удалось проверить обновление: ' + str(exc)[:300]
+        with self.lock:
+            self.checked_at = time.monotonic()
+            self.error = error
+            self.candidate = data if not error else None
+            self.remote_revision = hashlib.sha256(data).hexdigest() if not error else ''
+            self.remote_version = hub_update_version(data) if not error else ''
+            self.checking = False
+
+    def snapshot(self):
+        with self.lock:
+            job = hub_update_state(self.directory)
+            if job.get('status') in HUB_UPDATE_ACTIVE and time.time() - job.get('started_at', 0) > 420:
+                job.update(status='failed', message='Процесс обновления прерван. Итог не подтверждён; проверь сервис owrt-remote на VPS.')
+                hub_update_state(self.directory, job)
+            revision = HUB_LOADED_REVISION
+            return {'checking': self.checking, 'error': self.error, 'source': self.source,
+                    'current_revision': revision, 'remote_revision': self.remote_revision,
+                    'remote_version': self.remote_version, 'checked': bool(self.checked_at),
+                    'available': bool(self.remote_revision and self.remote_revision != revision),
+                    'job': job, 'csrf': self.csrf}
+
+    def start(self, revision):
+        with self.lock:
+            with hub_update_lock(self.directory):
+                job = hub_update_state(self.directory)
+                if job.get('status') in HUB_UPDATE_ACTIVE:
+                    raise RuntimeError('Обновление панели уже выполняется.')
+                if not revision or revision != self.remote_revision or not self.candidate or self.error or self.checking:
+                    raise ValueError('Результат проверки устарел. Проверь обновление ещё раз.')
+                if revision == HUB_LOADED_REVISION:
+                    raise ValueError('Эта сборка панели уже установлена.')
+                hub_update_validate(self.candidate)
+                if shutil.disk_usage(self.target.parent).free < HUB_UPDATE_LIMIT * 3:
+                    raise RuntimeError('Недостаточно свободного места для обновления и резервной копии.')
+                if shutil.disk_usage(self.directory).free < HUB_UPDATE_LIMIT * 3:
+                    raise RuntimeError('Недостаточно свободного места для резервной копии панели.')
+                job = {'id': secrets.token_hex(16), 'status': 'starting', 'started_at': time.time(),
+                       'message': 'Запускается обновление панели…', 'revision': revision,
+                       'version': self.remote_version, 'previous_revision': HUB_LOADED_REVISION,
+                       'health_url': self.health_url}
+                hub_update_write(self.directory / 'candidate.py', self.candidate)
+                hub_update_state(self.directory, job)
+                try:
+                    subprocess.run(['systemd-run', '--unit=owrt-remote-panel-update-' + job['id'], '--collect',
+                                    '--property=RuntimeMaxSec=360', '--setenv=OWRT_REMOTE_STATE_DIR=' + str(STATE_DIR),
+                                    sys.executable, str(self.target), 'panel-update-worker', '--job-id', job['id']],
+                                   check=True, capture_output=True, timeout=15)
+                except Exception as exc:
+                    job.update(status='failed', message='Не удалось запустить обновление через systemd: ' + str(exc)[:300])
+                    hub_update_state(self.directory, job)
+                    (self.directory / 'candidate.py').unlink(missing_ok=True)
+                    raise RuntimeError(job['message'])
+        return job
+
+
 class App:
     def __init__(self, db_path, session, agent, public_url):
         self.db_path = Path(db_path)
@@ -15181,6 +15601,7 @@ class App:
         self.router_monitor_thread = None
         self.vps_resources = VpsResourceMonitor()
         self.router_updates = RouterUpdateManager(self)
+        self.hub_update = HubUpdateManager()
 
     @contextmanager
     def conn(self):
@@ -16869,6 +17290,40 @@ a{{display:inline-flex;margin-top:18px;color:#93c5fd}}
             return
         self.send_bytes(200, router_updates_html(self.app.router_updates.csrf).encode('utf-8'), 'text/html; charset=utf-8')
 
+    def hub_update_api(self, action=''):
+        if not self.require_owner(json_mode=True):
+            return
+        manager = self.app.hub_update
+        if action:
+            if not secrets.compare_digest(self.headers.get('X-Hub-Update-CSRF', ''), manager.csrf):
+                self.send_json(403, {'ok': False, 'error': 'Обнови страницу панели и повтори.'})
+                return
+            if self.headers.get('Origin') and self.headers['Origin'] != self.request_origin():
+                self.send_json(403, {'ok': False, 'error': 'Недопустимый источник запроса.'})
+                return
+            length = self.headers.get('Content-Length', '')
+            if (self.headers.get('Transfer-Encoding') or not length.isdigit() or int(length) > 2048
+                    or 'application/json' not in self.headers.get('Content-Type', '')):
+                self.send_json(400, {'ok': False, 'error': 'Ожидается небольшой запрос JSON.'})
+                return
+            try:
+                payload = self.read_payload()
+                if not isinstance(payload, dict):
+                    raise ValueError('Ожидается объект JSON.')
+                if action == 'start':
+                    manager.start(payload.get('revision'))
+                else:
+                    manager.check(force=True)
+            except ValueError as exc:
+                self.send_json(400, {'ok': False, 'error': str(exc)})
+                return
+            except (RuntimeError, OSError) as exc:
+                self.send_json(409, {'ok': False, 'error': str(exc)})
+                return
+        else:
+            manager.check()
+        self.send_json(200, {'ok': True, **manager.snapshot()})
+
     def router_updates_api(self, action=''):
         if not self.require_owner(json_mode=True):
             return
@@ -18251,7 +18706,13 @@ exit 127
     def do_GET(self):
         path = self.parsed().path
         if path == "/health":
-            self.send_json(200, {"ok": True})
+            result = {"ok": True}
+            if self.query().get('panel-update') == ['1']:
+                result['revision'] = HUB_LOADED_REVISION
+            self.send_json(200, result)
+            return
+        if path == '/api/hub-update':
+            self.hub_update_api()
             return
         if path == "/api/vps/resources":
             if not self.admin_ok():
@@ -18382,6 +18843,7 @@ exit 127
                         "is_owner": bool(profile and profile.get("is_owner")),
                         "can_add_router": bool(profile and account_can_add_router(profile)),
                     },
+                    vps_resources=self.app.vps_resources.snapshot(),
                 ).encode("utf-8"),
                 "text/html; charset=utf-8",
                 extra_headers,
@@ -18502,6 +18964,9 @@ exit 127
 
     def do_POST(self):
         path = self.parsed().path
+        if path in {'/api/hub-update/check', '/api/hub-update/start'}:
+            self.hub_update_api(path.rsplit('/', 1)[-1])
+            return
         if path in {'/api/router-updates/start', '/api/router-updates/reboot', '/api/router-updates/cancel', '/api/router-updates/refresh'}:
             self.router_updates_api(path.rsplit('/', 1)[-1])
             return
@@ -19840,6 +20305,8 @@ def make_http_server(app, host, port, tls_cert="", tls_key=""):
 
 def cmd_serve(args):
     app = App(args.db, session_token(), agent_token(), args.public_url)
+    health_host = args.host if args.host not in {'', '0.0.0.0', '::'} else ('::1' if args.host == '::' else '127.0.0.1')
+    app.hub_update.health_url = 'http://' + ('[' + health_host + ']' if ':' in health_host else health_host) + ':' + str(args.port) + '/health'
     with app.conn():
         pass
     record_hub_start_event()
@@ -19973,6 +20440,10 @@ def parser():
         help="keep current router vps_host values when public_url and vps_host point to the same host, preserving old IP fallback during same-VPS domain migration",
     )
     rewrite.set_defaults(func=cmd_rewrite_endpoints)
+
+    update_worker = sub.add_parser('panel-update-worker', help=argparse.SUPPRESS)
+    update_worker.add_argument('--job-id', required=True)
+    update_worker.set_defaults(func=lambda args: sys.exit(run_hub_update_worker(args.job_id)))
 
     serve = sub.add_parser("serve", help="run web dashboard")
     serve.add_argument("--host", default=os.environ.get("OWRT_REMOTE_BIND", "0.0.0.0"))

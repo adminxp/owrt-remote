@@ -4,16 +4,16 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(process.argv[2], 'utf8').replace(/\r\n/g, '\n');
 const begin = source.indexOf('function initVpsResourceWidgets() {');
-const end = source.indexOf('\nsetInterval(loadRouters, 5000);', begin);
+const end = source.indexOf('\ninitVpsResourceWidgets();', begin);
 assert(begin >= 0 && end > begin);
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
-function fixture() {
+function fixture(initialPending = false) {
   const timers = new Map(), documentEvents = {}, windowEvents = {}, calls = [];
   let nextId = 1;
   const widgets = ['cpu', 'memory', 'disk', 'cpu', 'memory', 'disk'].map(key => ({
     dataset: {vpsResource: key}, label: {textContent: {cpu: 'ЦП', memory: 'ОЗУ', disk: 'ДИСК'}[key]},
-    value: {textContent: '—'}, title: '',
+    value: {textContent: '12,5%'}, title: '',
     querySelector(selector) { return selector === 'span' ? this.label : this.value; },
     setAttribute(key, value) { this[key] = value; },
   }));
@@ -26,10 +26,10 @@ function fixture() {
     setTimeout(fn, ms) { const id = nextId++; timers.set(id, {fn, ms}); return id; },
     clearInterval(id) { timers.delete(id); }, clearTimeout(id) { timers.delete(id); },
     fetch(url, options) { calls.push({url, options}); return context.respond(url, options); },
-    respond: async () => ({ok: true, status: 200, json: async () => metrics}),
+    respond: initialPending ? () => new Promise(() => {}) : async () => ({ok: true, status: 200, json: async () => metrics}),
   };
   vm.createContext(context);
-  vm.runInContext(source.slice(begin, end), context);
+  vm.runInContext(source.slice(begin, end) + '\ninitVpsResourceWidgets();', context);
   return {context, timers, calls, widgets, documentEvents, windowEvents,
     tick() { const timer = [...timers.values()].find(t => t.interval); assert(timer); return timer.fn(); },
     intervals() { return [...timers.values()].filter(t => t.interval); },
@@ -37,11 +37,18 @@ function fixture() {
 }
 
 (async () => {
+  const initial = fixture(true);
+  assert.equal(initial.calls.length, 1);
+  initial.windowEvents.pageshow();
+  assert.equal(initial.calls.length, 1, 'initial pageshow reuses the pending fetch');
+  assert.equal(initial.calls[0].options.signal.aborted, false, 'opening page must not cancel initial fetch');
+  assert(initial.widgets.every(widget => widget.value.textContent === '12,5%'), 'keep server-rendered values while first fetch is pending');
+  initial.windowEvents.pagehide();
   const f = fixture();
   await flush();
   assert.equal(f.calls.length, 1, 'first update starts immediately');
   assert.equal(f.intervals().length, 1);
-  assert.equal(f.intervals()[0].ms, 3000);
+  assert.equal(f.intervals()[0].ms, 1000);
   assert.equal(f.calls[0].url, '/api/vps/resources');
   assert.equal(f.calls[0].options.cache, 'no-store');
   assert.equal(f.widgets[0].value.textContent, '25%');
@@ -94,5 +101,5 @@ function fixture() {
   assert(g.calls.at(-1).options.signal.aborted);
   assert.equal(g.widgets[0].dataset.stale, 'true');
   g.windowEvents.pagehide();
-  console.log('VPS_WIDGETS_UI_OK: immediate/3s updates, no overlaps, desktop/mobile, errors, timeout, pause/resume and session expiry');
+  console.log('VPS_WIDGETS_UI_OK: immediate/1s updates, no overlaps, desktop/mobile, errors, timeout, pause/resume and session expiry');
 })().catch(error => { console.error(error); process.exitCode = 1; });

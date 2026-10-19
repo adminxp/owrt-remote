@@ -65,10 +65,10 @@ class ResourceSampleTests(unittest.TestCase):
             for thread in threads: thread.join(timeout=5)
             self.assertEqual(len(results), 8)
             self.assertEqual(cpu.call_count, 1)
-            clock.return_value = 12.99
+            clock.return_value = 10.99
             self.monitor.snapshot()
             self.assertEqual(cpu.call_count, 1)
-            clock.return_value = 13
+            clock.return_value = 11
             self.monitor.snapshot()
             self.assertEqual(cpu.call_count, 2)
 
@@ -90,6 +90,40 @@ class QuietHandler(hub.Handler):
 
 
 class ResourceHttpTests(unittest.TestCase):
+    def test_dashboard_contains_metrics_before_browser_fetch(self):
+        app = hub.App(Path(STATE.name) / "dashboard.db", "test-session", "test-agent", "")
+        server = hub.HubHTTPServer(("127.0.0.1", 0), QuietHandler)
+        server.app = app
+        server.is_tls = False
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        sample = {"cpu": {"percent": 12.5}, "memory": {"percent": 40},
+                  "disk": {"percent": 60}, "sampled_at": 123}
+        try:
+            with mock.patch.object(app.vps_resources, "snapshot", return_value=sample) as snapshot, \
+                    mock.patch.object(hub.Handler, "legacy_admin_ok", return_value=False), \
+                    mock.patch.object(hub.Handler, "current_hub_session", return_value={"username": "root"}), \
+                    mock.patch.object(hub.Handler, "current_account_profile", return_value={"username": "root", "is_owner": True}), \
+                    mock.patch.object(hub, "web_push_backend_status", return_value={"ready": False}):
+                request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/",
+                                                 headers={"Cookie": "owrt_remote_session=test-session"})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    page = response.read().decode("utf-8")
+                snapshot.assert_called_once_with()
+            values = re.findall(r'<strong data-vps-resource-value>([^<]+)</strong>', page)
+            self.assertEqual(values, ["12,5%", "40%", "60%"] * 2, "desktop and mobile have values in HTML")
+            self.assertIn('aria-label="ЦП: 12,5%"', page)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_unavailable_readings_are_not_invented(self):
+        page = hub.vps_resource_widgets_html(resources={"cpu": {"percent": None},
+                                                        "memory": {"percent": float("nan")},
+                                                        "disk": {"percent": 0}})
+        self.assertEqual(re.findall(r'<strong data-vps-resource-value>([^<]+)</strong>', page), ["—", "—", "0%"])
+
     def test_metrics_require_hub_login_and_never_open_router_database(self):
         app = hub.App(Path(STATE.name) / "unused.db", "test-session", "test-agent", "")
         server = hub.HubHTTPServer(("127.0.0.1", 0), QuietHandler)

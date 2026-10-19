@@ -13,7 +13,7 @@ $RemoteScript = @'
 #!/bin/sh
 set -eu
 stage=/tmp/__UPLOAD_NAME__
-backup=/root/owrt-remote-backup-before-heartbeat-redirect-v117
+backup=/root/owrt-remote-backup-before-heartbeat-redirect-v118
 agent=/usr/sbin/owrt-remote
 wan=/usr/lib/owrt-remote/wan.sh
 changed=0

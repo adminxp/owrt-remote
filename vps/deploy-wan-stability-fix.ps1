@@ -17,7 +17,7 @@ $RemoteScript = @'
 #!/bin/sh
 set -eu
 stage=/tmp/__UPLOAD_NAME__
-backup=/root/owrt-remote-backup-before-wan-stability-v117
+backup=/root/owrt-remote-backup-before-wan-stability-v118
 config=/etc/config/owrtremote
 changed=0
 fail() {

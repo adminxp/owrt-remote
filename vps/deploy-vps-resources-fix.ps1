@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$UploadName = 'owrt-version-v117-' + [guid]::NewGuid().ToString('N')
+$UploadName = 'owrt-vps-resources-live-' + [guid]::NewGuid().ToString('N')
 $StageRoot = Join-Path ([System.IO.Path]::GetTempPath()) $UploadName
 $Utf8 = [System.Text.UTF8Encoding]::new($false)
 
@@ -15,7 +15,7 @@ $RemoteScript = @'
 set -eu
 stage=/tmp/__UPLOAD_NAME__
 target=/opt/owrt-remote/owrt-remote-hub.py
-backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-v117
+backup=/opt/owrt-remote/owrt-remote-hub.py.bak-before-vps-resources-live-v118
 candidate=$target.new-__UPLOAD_NAME__
 changed=0
 
@@ -57,10 +57,14 @@ if [ '__ACTION__' = Install ]; then
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).read_text(encoding='utf-8')
-required = ('v117',)
-if 'v' + '116' in source:
-    print('Old UI version remains in candidate', file=sys.stderr)
-    raise SystemExit(1)
+required = (
+    "def vps_resource_widgets_html(mobile=False, resources=None):",
+    "vps_resources=self.app.vps_resources.snapshot(),",
+    "vps_resource_widgets_html(resources=vps_resources)",
+    "vps_resource_widgets_html(mobile=True, resources=vps_resources)",
+    "interval = 1.0",
+    "timer = setInterval(load, 1000);",
+)
 missing = [marker for marker in required if marker not in source]
 if missing:
     for marker in missing:
@@ -103,7 +107,7 @@ if [ "$healthy" -ne 1 ]; then
     exit 1
 fi
 cmp "$source_file" "$target"
-printf '\nBackup: %s\nHUB_V117_%s_OK\n' "$backup" '__ACTION__'
+printf '\nBackup: %s\nVPS_RESOURCES_LIVE_V118_%s_OK\n' "$backup" '__ACTION__'
 '@
 
 $RemoteScript = $RemoteScript.Replace('__UPLOAD_NAME__', $UploadName).Replace('__ACTION__', $Action)
@@ -130,7 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Upload failed. VPS was not changed.' }
     & ssh -T -o ConnectTimeout=10 $Vps "sh /tmp/$UploadName/run.sh"
     if ($LASTEXITCODE -ne 0) { throw "$Action failed. See the output above; success was not confirmed." }
-    Write-Host "Hub v117 $Action finished successfully. Refresh the Hub panel."
+    Write-Host "VPS resources fix $Action finished successfully."
 }
 finally {
     if (-not $PrepareOnly) {
