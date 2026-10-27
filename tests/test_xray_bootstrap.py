@@ -4,12 +4,13 @@ OWRT_TEST_BUSYBOX selects real BusyBox ash and its built-in applets.
 """
 import gzip
 import hashlib
+import io
 import os
 from pathlib import Path
 import shlex
 import subprocess
+import tarfile
 import unittest
-import zipfile
 
 import test_host_policy as base
 
@@ -28,8 +29,9 @@ class XrayBootstrapTests(unittest.TestCase):
         self.env['PATH'] = str(Path(base.SH).parent) + os.pathsep + os.environ['PATH']
         self.mocks = r'''
 xray_cache_dir() { printf '%s' "$TEST_ROOT/flash"; }
-xray_release_asset() { printf Xray-linux-arm64-v8a.zip; }
+xray_release_asset() { printf openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk; }
 xray_arch() { printf aarch64; }
+xray_package_extract_binary() { cp "$TEST_ROOT/release.pkg" "$2"; }
 ensure_ca_certificates() { return 0; }
 ensure_fetch_tool() { return 0; }
 '''
@@ -56,16 +58,55 @@ xray_process_start() { [ "$1" != "$$" ] || printf 1; }
         return subprocess.run(args + [script.as_posix()], capture_output=True, encoding='utf-8',
                               env={**self.env, **env}, timeout=40)
 
+    def raw_shell(self, commands, mocks='', **env):
+        shell = os.environ.get('OWRT_TEST_BUSYBOX', base.SH)
+        args = [shell, 'ash'] if 'busybox' in shell.lower() else [shell]
+        script = self.directory / 'raw-run.sh'
+        script.write_text(self.agent + '\n' + base.MOCKS + '\n' + mocks + '\n' + commands,
+                          encoding='utf-8', newline='\n')
+        return subprocess.run(args + [script.as_posix()], capture_output=True, encoding='utf-8',
+                              env={**self.env, **env}, timeout=40)
+
     def make_binary(self, text='Xray test version'):
         data = f'#!/bin/sh\ncase "$1" in version) echo "{text}" ;; *) exit 0 ;; esac\n'.encode()
         self.binary.write_bytes(data)
         self.binary.chmod(0o755)
         return data
 
+    def test_yichya_asset_uses_openwrt_opkg_architecture(self):
+        result = self.raw_shell('xray_release_asset', mocks=r'''
+opkg() {
+    [ "$1" = print-architecture ] || return 1
+    printf '%s\n' 'arch all 1' 'arch noarch 1' 'arch aarch64_cortex-a53 10'
+}
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1],
+                         'openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk')
+
+    def test_yichya_ipk_extracts_only_usr_bin_xray(self):
+        binary = self.make_binary('package')
+        inner = io.BytesIO()
+        with tarfile.open(fileobj=inner, mode='w') as archive:
+            entry = tarfile.TarInfo('./usr/bin/xray')
+            entry.mode = 0o755
+            entry.size = len(binary)
+            archive.addfile(entry, io.BytesIO(binary))
+        data = gzip.compress(inner.getvalue())
+        outer = io.BytesIO()
+        with tarfile.open(fileobj=outer, mode='w') as archive:
+            entry = tarfile.TarInfo('./data.tar.gz')
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+        (self.directory / 'release.pkg').write_bytes(gzip.compress(outer.getvalue()))
+        result = self.raw_shell('xray_package_extract_binary "$TEST_ROOT/release.pkg" "$TEST_ROOT/extracted"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.directory / 'extracted').read_bytes(), binary)
+
     def cache(self, data=None):
         data = data or self.make_binary()
         self.store.mkdir(exist_ok=True)
-        path = self.store / ('Xray-linux-arm64-v8a.zip.' + hashlib.sha256(data).hexdigest() + '.gz')
+        path = self.store / ('openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk.' + hashlib.sha256(data).hexdigest() + '.gz')
         path.write_bytes(gzip.compress(data))
         return path
 
@@ -122,10 +163,10 @@ xray_process_start() { [ "$1" != "$$" ] || printf 1; }
         self.assertEqual(gzip.decompress(cached.read_bytes()), data)
         self.assert_clean()
 
-    def test_invalid_zip_preserves_working_binary_and_cache(self):
+    def test_invalid_package_preserves_working_binary_and_cache(self):
         data = self.make_binary()
         cached = self.cache(data)
-        result = self.shell('install_xray_tmp', mocks='fetch_file() { echo invalid >"$2"; }')
+        result = self.shell('install_xray_tmp', mocks='fetch_file() { echo invalid >"$2"; }; xray_package_extract_binary() { return 1; }')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.binary.read_bytes(), data)
         self.assertTrue(cached.exists())
@@ -136,15 +177,12 @@ xray_process_start() { [ "$1" != "$$" ] || printf 1; }
         cached = self.cache(old)
         new = self.make_binary('new')
         self.binary.write_bytes(old)
-        with zipfile.ZipFile(self.directory / 'release.zip', 'w') as archive:
-            archive.writestr('xray', new)
-            archive.writestr('../should-not-extract', 'no')
-        result = self.shell('install_xray_tmp', mocks='fetch_file() { cp "$TEST_ROOT/release.zip" "$2"; }')
+        (self.directory / 'release.pkg').write_bytes(new)
+        result = self.shell('install_xray_tmp', mocks='fetch_file() { cp "$TEST_ROOT/release.pkg" "$2"; }')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.binary.read_bytes(), new)
         self.assertFalse(cached.exists())
         self.assertEqual(len(list(self.store.glob('*.gz'))), 1)
-        self.assertFalse((self.directory / 'should-not-extract').exists())
         self.assert_clean()
 
     def test_full_or_unmounted_flash_never_breaks_existing_xray(self):
@@ -212,11 +250,10 @@ sleep() { printf '%s\n' "$1" >>"$TEST_ROOT/delays"; }
     def test_two_concurrent_preparations_download_once_and_release_lock(self):
         data = self.make_binary()
         self.binary.unlink()
-        with zipfile.ZipFile(self.directory / 'release.zip', 'w') as archive:
-            archive.writestr('xray', data)
+        (self.directory / 'release.pkg').write_bytes(data)
         script = self.directory / 'parallel.sh'
         script.write_text(self.agent + '\n' + base.MOCKS + '\n' + self.mocks + r'''
-fetch_file() { echo download >>"$TEST_ROOT/downloads"; sleep 2; cp "$TEST_ROOT/release.zip" "$2"; }
+fetch_file() { echo download >>"$TEST_ROOT/downloads"; sleep 2; cp "$TEST_ROOT/release.pkg" "$2"; }
 ensure_xray_available
 ''', encoding='utf-8', newline='\n')
         processes = [subprocess.Popen([base.SH, script.as_posix()], env=self.env, stdout=subprocess.PIPE,
@@ -253,7 +290,7 @@ curl() {
 
     def test_each_download_redirect_uses_wan_dns_and_keeps_tls_verification(self):
         self.config(wan_direct='1')
-        result = self.shell('fetch_file https://github.com/XTLS/release.zip "$TEST_ROOT/download"',
+        result = self.shell('fetch_file https://github.com/yichya/openwrt-xray/releases/download/v26.10.21/openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk "$TEST_ROOT/download"',
                             mocks=self.CURL_MOCK, http_proxy='', https_proxy='')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.directory / 'resolved').read_text().splitlines(),

@@ -10,7 +10,7 @@ execFileSync(process.env.TEST_PYTHON || 'python', ['tests/test_vps_resources.py'
 const pageHtml = fs.readFileSync(path.join(output, 'dashboard.html'), 'utf8');
 function state() {
   return {ok:true,checked:true,checking:false,error:'',source:'https://raw.githubusercontent.com/kzolotarev95/luci-app-owrt-remote/main',
-    current_revision:'a'.repeat(64),remote_revision:'b'.repeat(64),remote_version:'v118',available:true,job:{},csrf:'test-csrf'};
+    current_revision:'a'.repeat(64),current_version:'v119',remote_revision:'b'.repeat(64),remote_version:'v119',source_older:false,available:true,job:{},csrf:'test-csrf'};
 }
 async function createFixture(browser,width,height,mobile) {
   const page = await browser.newPage({viewport:{width,height},isMobile:mobile,hasTouch:mobile});
@@ -83,7 +83,28 @@ async function createFixture(browser,width,height,mobile) {
       await page.evaluate(()=>window.dispatchEvent(new Event('pageshow')));
       await page.waitForFunction(()=>document.querySelector('[data-hub-update]').dataset.updateState==='current');
       assert.equal(await button.evaluate(el=>getComputedStyle(el).color),'rgb(187, 247, 208)','current build is green');
+      assert.equal(await button.textContent(),'Обновление не требуется');
+      assert(await notice.isHidden(),'current build has no separate notice on desktop or mobile');
+      assert.equal(await notice.textContent(),'','previous update notice is cleared');
+      const checks=fixture.checks;
+      await button.click();
+      assert.equal(fixture.checks,checks+1,'current build button still checks for updates');
+      assert(await notice.isHidden(),'manual check of current build leaves no banner');
       await page.screenshot({path:path.join(output,'current-'+width+'.png'),fullPage:false});
+      fixture.data.source_older=true;
+      fixture.data.remote_version='v'+(Number(fixture.data.current_version.slice(1))-1);
+      fixture.data.remote_revision='d'.repeat(64);
+      await page.evaluate(()=>window.dispatchEvent(new Event('pageshow')));
+      await page.waitForFunction(()=>document.querySelector('[data-hub-update]').title.includes('Более старая версия'));
+      assert.equal(await button.textContent(),'Обновление не требуется');
+      assert.equal(await button.getAttribute('data-update-state'),'current');
+      assert(await notice.isHidden(),'older published version never produces an update banner');
+      fixture.data.remote_version='v'+(Number(fixture.data.current_version.slice(1))-2);
+      await button.click();
+      await page.waitForFunction(version=>document.querySelector('[data-hub-update]').title.includes('в источнике '+version),fixture.data.remote_version);
+      assert.equal(fixture.starts,0,'older source only permits checking, never installation');
+      assert(await page.locator('#hubUpdateConfirm').isHidden(),'older source never asks to install');
+      fixture.data.source_older=false;fixture.data.remote_version=fixture.data.current_version;
       fixture.data.error='Не удалось проверить обновление: Сборка в источнике ещё не поддерживает проверяемое обновление из панели.';
       await page.evaluate(()=>window.dispatchEvent(new Event('pageshow')));
       await page.waitForFunction(()=>document.querySelector('[data-hub-update]').dataset.updateState==='error');
@@ -122,7 +143,7 @@ async function createFixture(browser,width,height,mobile) {
       await page.waitForFunction(()=>document.getElementById('hubUpdateNotice').dataset.result==='succeeded',null,{timeout:6000});
       await page.waitForTimeout(1700);
       assert.equal(fixture.views,2,'exactly one automatic page reload');
-      await page.waitForFunction(()=>document.getElementById('hubUpdateNotice').textContent==='У вас последняя версия панели, обновление не требуется.');
+      await page.waitForFunction(()=>document.querySelector('[data-hub-update]').textContent==='Обновление не требуется'&&document.getElementById('hubUpdateNotice').hidden);
       assert.equal(await button.getAttribute('data-update-state'),'current','updated build is current after reload');
       await page.waitForTimeout(1700);assert.equal(fixture.views,2,'successful old job must not cause reload loop');
       assert.equal(fixture.starts,1,'reconnect never resends install');

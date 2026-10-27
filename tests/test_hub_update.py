@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,13 @@ with mock.patch.dict(os.environ, {'OWRT_REMOTE_STATE_DIR': STATE.name}):
     spec.loader.exec_module(hub)
 SOURCE = (ROOT / 'vps/owrt-remote-hub.py').read_bytes()
 NEW = SOURCE + b'\n# update test build\n'
+CURRENT_VERSION = int(hub.HUB_LOADED_VERSION[1:])
+
+
+def versioned_source(version):
+    return re.sub(rb'(appBannerVersion[^>]*>)v[0-9]+',
+                  lambda match: match[1] + ('v' + str(version)).encode('ascii'),
+                  SOURCE, count=1)
 
 
 class UpdateTests(unittest.TestCase):
@@ -59,7 +67,7 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(fetch.call_args.args[0].full_url, source + '/vps/owrt-remote-hub.py')
             data = self.manager.snapshot()
             self.assertTrue(data['available'])
-            self.assertEqual(data['remote_version'], 'v118')
+            self.assertEqual(data['remote_version'], 'v119')
             self.assertEqual(data['remote_revision'], hashlib.sha256(NEW).hexdigest())
         self.assertEqual(self.target.read_bytes(), SOURCE)
 
@@ -74,6 +82,53 @@ class UpdateTests(unittest.TestCase):
             self.assertTrue(data['error'])
             self.assertFalse(data['available'])
         self.assertEqual(self.target.read_bytes(), SOURCE)
+
+    def test_older_published_version_is_not_offered_and_stale_start_is_rejected(self):
+        older = versioned_source(CURRENT_VERSION - 1)
+        with mock.patch.object(hub.urllib.request, 'urlopen', return_value=self.response(older)):
+            self.manager._check()
+        state = self.manager.snapshot()
+        self.assertNotEqual(state['remote_revision'], state['current_revision'])
+        self.assertFalse(state['available'])
+        self.assertTrue(state['source_older'])
+        self.assertFalse(state['error'])
+        self.assertEqual(state['current_version'], hub.HUB_LOADED_VERSION)
+        self.assertEqual(state['remote_version'], 'v' + str(CURRENT_VERSION - 1))
+        with mock.patch.object(hub.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'Понижение версии'):
+                self.manager.start(state['remote_revision'])
+            self.assertFalse(run.called)
+        self.assertEqual(self.target.read_bytes(), SOURCE)
+        self.assertFalse((self.directory / 'candidate.py').exists())
+        self.assertFalse((self.directory / 'job.json').exists())
+
+    def test_newer_version_is_offered_and_installed(self):
+        newer = versioned_source(CURRENT_VERSION + 1)
+        with mock.patch.object(hub.urllib.request, 'urlopen', return_value=self.response(newer)):
+            self.manager._check()
+        self.assertTrue(self.manager.snapshot()['available'])
+        self.assertFalse(self.manager.snapshot()['source_older'])
+        with mock.patch.object(hub.subprocess, 'run'):
+            job = self.manager.start(self.manager.remote_revision)
+        with mock.patch.object(hub.time, 'sleep'), mock.patch.object(hub.subprocess, 'run'), \
+                mock.patch.object(hub, 'hub_update_health', return_value=True):
+            self.assertEqual(hub.run_hub_update_worker(job['id'], self.directory, self.target), 0)
+        self.assertEqual(self.target.read_bytes(), newer)
+        self.assertEqual(hub.hub_update_state(self.directory)['status'], 'succeeded')
+
+    def test_worker_rejects_a_downgrade_job_before_replacing_or_restarting(self):
+        job = self.prepare()
+        older = versioned_source(CURRENT_VERSION - 1)
+        (self.directory / 'candidate.py').write_bytes(older)
+        job.update(revision=hashlib.sha256(older).hexdigest(), version=hub.hub_update_version(older))
+        hub.hub_update_state(self.directory, job)
+        with mock.patch.object(hub.time, 'sleep'), mock.patch.object(hub.subprocess, 'run') as run:
+            self.assertEqual(hub.run_hub_update_worker(job['id'], self.directory, self.target), 1)
+            self.assertFalse(run.called)
+        self.assertEqual(self.target.read_bytes(), SOURCE)
+        self.assertFalse((self.directory / 'previous.py').exists())
+        self.assertFalse((self.directory / 'candidate.py').exists())
+        self.assertIn('Понижение версии', hub.hub_update_state(self.directory)['message'])
 
     def test_timeout_and_https_downgrade_never_modify_target(self):
         with mock.patch.object(hub.urllib.request, 'urlopen', side_effect=TimeoutError('DNS/TLS timeout')):

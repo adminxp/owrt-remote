@@ -25,7 +25,7 @@ class XrayValidationDeploymentTests(unittest.TestCase):
             self.env["PATH"] = str(GIT_BIN) + os.pathsep + self.env["PATH"]
         source = (ROOT / "vps/deploy-xray-validation-fix.ps1").read_text(encoding="utf-8")
         self.script = source.split("$RemoteScript = @'\n", 1)[1].split("\n'@", 1)[0]
-        self.script = self.script.replace("backup_dir=/root/owrt-remote-backup-before-xray-validation-v118",
+        self.script = self.script.replace("backup_dir=/root/owrt-remote-backup-before-xray-validation-v119",
                                           "backup_dir=" + shlex.quote(self.backup.as_posix()))
         self.script = self.script.replace("printf /www/cgi-bin/owrt-remote", "printf %s " + shlex.quote(self.targets["cgi"].as_posix()))
         self.script = self.script.replace("printf /usr/sbin/owrt-remote", "printf %s " + shlex.quote(self.targets["agent"].as_posix()))

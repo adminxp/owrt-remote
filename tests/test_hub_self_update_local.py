@@ -169,7 +169,7 @@ class LocalTestTests(unittest.TestCase):
                                 env={**os.environ, 'TEMP': str(self.root), 'TMP': str(self.root)})
         self.assertEqual(result.returncode, 0, result.stderr)
         stage = Path(next(line.split(': ', 1)[1] for line in result.stdout.splitlines() if line.startswith('Prepared only: ')))
-        self.assertEqual(stage.parent, self.root)
+        self.assertTrue(stage.parent.samefile(self.root), 'staging stays in the requested temporary directory')
         compile((stage / 'run.py').read_bytes(), 'prepared-tool.py', 'exec')
         self.assertEqual((stage / 'hub.py').read_bytes(), SOURCE)
 

@@ -73,7 +73,19 @@ except Exception:
 APP_NAME = "OpenWrt Remote Hub"
 RAW_REPO_BASE = os.environ.get("RAW_REPO_BASE", "https://raw.githubusercontent.com/kzolotarev95/luci-app-owrt-remote/main").rstrip("/")
 APP_DIR = Path(__file__).resolve().parent
-HUB_LOADED_REVISION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def hub_update_version(data):
+    match = re.search(rb'appBannerVersion[^>]*>(v[0-9]+)', data)
+    return match[1].decode('ascii') if match else 'последняя сборка'
+
+
+def _hub_source_identity():
+    source = Path(__file__).read_bytes()
+    return hashlib.sha256(source).hexdigest(), hub_update_version(source)
+
+
+HUB_LOADED_REVISION, HUB_LOADED_VERSION = _hub_source_identity()
 STATIC_DIR = APP_DIR / "static"
 BRAND_THEME_COLOR = "#24192f"
 FAVICON_ICO_FILE = STATIC_DIR / "favicon.ico"
@@ -5137,8 +5149,8 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
     <div class="brand">
       <div class="desktopHeader">
         <div class="desktopHeaderTop">
-          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v118</span></span></h1>
-          <button class="badge hubUpdateButton" data-hub-update type="button" {'hidden' if not is_owner else ''}>Обновление панели</button>
+          <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v119</span></span></h1>
+          <button class="badge hubUpdateButton" data-hub-update type="button" {'hidden' if not is_owner else ''}>Проверить обновление панели</button>
           <div class="routerSearchDock" id="routerSearchDock">
             <button class="routerSearchToggle" id="routerSearchToggle" type="button" aria-expanded="false" aria-controls="routerSearchPanel" data-active="false">
               <span>Поиск роутеров</span>
@@ -5475,8 +5487,8 @@ input,select{{min-width:0;border:1px solid var(--line);border-radius:8px;padding
     </div>
     {vps_resource_widgets_html(mobile=True, resources=vps_resources)}
     <div class="mobileSearchDock" id="mobileHubUpdateDock">
-      <span class="mobileSearchVersion">v118</span>
-      <button class="badge hubUpdateButton" data-hub-update type="button" {'hidden' if not is_owner else ''}>Обновление панели</button>
+      <span class="mobileSearchVersion">v119</span>
+      <button class="badge hubUpdateButton" data-hub-update type="button" {'hidden' if not is_owner else ''}>Проверить обновление панели</button>
     </div>
     <div class="mobileSearchDock" id="mobileSeasonDock" aria-label="Зимние эффекты">
       <button class="routerSearchToggle seasonToggle mobilePanelToggle primary" id="mobileSeasonToggle" type="button" aria-expanded="false" aria-controls="mobileSeasonPanel" data-open="false">
@@ -11784,8 +11796,8 @@ function initHubUpdate() {{
       button.disabled = busy || state.checking;
       button.dataset.available = state.available ? 'true' : 'false';
       button.dataset.updateState = busy ? 'busy' : state.checking ? 'checking' : state.error ? 'error' : state.available ? 'available' : state.checked ? 'current' : 'checking';
-      button.textContent = busy ? 'Обновляется…' : state.checking ? 'Проверка…' : state.available ? 'Доступно обновление' : 'Обновление панели';
-      button.title = state.available ? 'Доступна сборка ' + state.remote_version + ' · ' + state.remote_revision.slice(0, 8) : state.error || 'Проверить обновление панели';
+      button.textContent = busy ? 'Обновляется…' : state.checking ? 'Проверка…' : state.available ? 'Доступно обновление' : state.checked && !state.error ? 'Обновление не требуется' : 'Проверить обновление панели';
+      button.title = state.available ? 'Доступна сборка ' + state.remote_version + ' · ' + state.remote_revision.slice(0, 8) : state.error || (state.source_older ? 'Установлена ' + state.current_version + '; в источнике ' + state.remote_version + '. Более старая версия не устанавливается.' : 'Проверить обновление панели');
     }});
     if (busy) {{
       if (!pending) {{ remember(job.id); deadline = Date.now() + 300000; }}
@@ -11797,7 +11809,7 @@ function initHubUpdate() {{
     }} else if (state.error) message(state.error, 'failed');
     else if (job.status === 'failed') message(job.message, 'failed');
     else if (state.available) message('Доступно обновление панели: ' + state.remote_version + ' · сборка ' + state.remote_revision.slice(0, 8) + '.');
-    else if (state.checked && !state.checking) message('У вас последняя версия панели, обновление не требуется.', 'succeeded');
+    else if (state.checked && !state.checking) message('');
     else if (state.checking) message('Проверяется наличие обновлений панели…');
     else message('');
   }};
@@ -13127,7 +13139,7 @@ button:hover{{filter:brightness(1.06)}}
       <form class="login" method="post" action="/login">
     {error_html}
     <span class="brand">
-      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v118</span></span></h1>
+      <h1 class="appBanner"><span>OpenWrt Remote Hub <span class="appBannerVersion">v119</span></span></h1>
     </span>
     <label for="hubUsername">Логин</label>
     <input id="hubUsername" name="username" autocomplete="off" autofocus required>
@@ -13599,7 +13611,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;background:li
                 <circle cx="65" cy="59" r="3" fill="#E5F2FF"/>
               </svg>
             </div>
-            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v118</span></h2>
+            <h2 class="brandTitle">OpenWrt Remote Hub <span class="brandVersion">v119</span></h2>
           </div>
         </div>
         <div class="brandBottom">
@@ -15416,9 +15428,17 @@ def hub_update_validate(data):
     return data
 
 
-def hub_update_version(data):
-    match = re.search(rb'appBannerVersion[^>]*>(v[0-9]+)', data)
-    return match[1].decode('ascii') if match else 'последняя сборка'
+def hub_update_older_version(candidate_version, installed_version):
+    candidate = re.fullmatch(r'v([0-9]+)', candidate_version)
+    installed = re.fullmatch(r'v([0-9]+)', installed_version)
+    return bool(candidate and installed and int(candidate[1]) < int(installed[1]))
+
+
+def hub_update_require_version(data, installed_version):
+    version = hub_update_version(data)
+    if hub_update_older_version(version, installed_version):
+        raise ValueError('В источнике более старая версия ' + version + ', установлена '
+                         + installed_version + '. Понижение версии через обновление панели запрещено.')
 
 
 def hub_update_health(url, revision, attempts=30):
@@ -15455,6 +15475,7 @@ def run_hub_update_worker(job_id, directory=None, target=None):
             previous = target.read_bytes()
             if hashlib.sha256(previous).hexdigest() != job.get('previous_revision'):
                 raise RuntimeError('Файл Hub изменился после подтверждения; обнови страницу.')
+            hub_update_require_version(data, hub_update_version(previous))
             hub_update_write(directory / 'previous.py', previous, 0o700)
             report('installing', 'Устанавливается новая сборка панели…')
             hub_update_write(target, data, 0o755)
@@ -15549,10 +15570,12 @@ class HubUpdateManager:
                 job.update(status='failed', message='Процесс обновления прерван. Итог не подтверждён; проверь сервис owrt-remote на VPS.')
                 hub_update_state(self.directory, job)
             revision = HUB_LOADED_REVISION
+            source_older = hub_update_older_version(self.remote_version, HUB_LOADED_VERSION)
             return {'checking': self.checking, 'error': self.error, 'source': self.source,
-                    'current_revision': revision, 'remote_revision': self.remote_revision,
+                    'current_revision': revision, 'current_version': HUB_LOADED_VERSION,
+                    'remote_revision': self.remote_revision, 'source_older': source_older,
                     'remote_version': self.remote_version, 'checked': bool(self.checked_at),
-                    'available': bool(self.remote_revision and self.remote_revision != revision),
+                    'available': bool(self.remote_revision and self.remote_revision != revision and not source_older),
                     'job': job, 'csrf': self.csrf}
 
     def start(self, revision):
@@ -15566,6 +15589,7 @@ class HubUpdateManager:
                 if revision == HUB_LOADED_REVISION:
                     raise ValueError('Эта сборка панели уже установлена.')
                 hub_update_validate(self.candidate)
+                hub_update_require_version(self.candidate, HUB_LOADED_VERSION)
                 if shutil.disk_usage(self.target.parent).free < HUB_UPDATE_LIMIT * 3:
                     raise RuntimeError('Недостаточно свободного места для обновления и резервной копии.')
                 if shutil.disk_usage(self.directory).free < HUB_UPDATE_LIMIT * 3:

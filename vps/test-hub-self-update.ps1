@@ -148,7 +148,7 @@ def prepare():
         if changed:
             atomic(TARGET, original, 0o755)
             restart()
-            revision = digest(original) if b'HUB_LOADED_REVISION =' in original else ''
+            revision = digest(original) if b'HUB_LOADED_REVISION' in original else ''
             if not healthy(revision):
                 raise RuntimeError('Previous file restored but service health is not confirmed. Backup: ' + str(ROOT / 'before.py'))
         cleanup_test()
@@ -194,7 +194,7 @@ def restore():
         raise RuntimeError('Test backup validation failed. Nothing changed.')
     atomic(TARGET, original, 0o755)
     restart()
-    revision = digest(original) if b'HUB_LOADED_REVISION =' in original else ''
+    revision = digest(original) if b'HUB_LOADED_REVISION' in original else ''
     if not healthy(revision):
         raise RuntimeError('Previous file restored but service health is not confirmed. Backup was kept.')
     cleanup_test()
