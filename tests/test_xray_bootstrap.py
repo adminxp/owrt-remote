@@ -48,6 +48,10 @@ ulimit() { [ "$1 $2" = '-f 32768' ]; }
 xray_process_identity() { XRAY_SELF_PID=$$; XRAY_SELF_BIRTH=1; }
 xray_process_start() { [ "$1" != "$$" ] || printf 1; }
 '''
+        self.raw_process_mocks = r'''
+xray_process_identity() { XRAY_SELF_PID=$$; XRAY_SELF_BIRTH=1; }
+xray_process_start() { [ "$1" != "$$" ] || printf 1; }
+''' if os.environ.get('OWRT_TEST_BUSYBOX') and os.name == 'nt' else ''
 
     def shell(self, commands, mocks='', **env):
         shell = os.environ.get('OWRT_TEST_BUSYBOX', base.SH)
@@ -62,7 +66,7 @@ xray_process_start() { [ "$1" != "$$" ] || printf 1; }
         shell = os.environ.get('OWRT_TEST_BUSYBOX', base.SH)
         args = [shell, 'ash'] if 'busybox' in shell.lower() else [shell]
         script = self.directory / 'raw-run.sh'
-        script.write_text(self.agent + '\n' + base.MOCKS + '\n' + mocks + '\n' + commands,
+        script.write_text(self.agent + '\n' + base.MOCKS + '\n' + self.raw_process_mocks + '\n' + mocks + '\n' + commands,
                           encoding='utf-8', newline='\n')
         return subprocess.run(args + [script.as_posix()], capture_output=True, encoding='utf-8',
                               env={**self.env, **env}, timeout=40)
@@ -103,6 +107,95 @@ opkg() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.directory / 'extracted').read_bytes(), binary)
 
+    APK_EXTRACT_MOCK = r'''
+apk() {
+    local destination archive allow
+    [ "$1" != --print-arch ] || { echo aarch64_generic; return 0; }
+    printf '%s\n' "$*" >>"$TEST_ROOT/apk-calls"
+    # Package installation/dependency resolution must never be used here.
+    [ "$1" = extract ] || return 91
+    shift
+    destination=''; archive=''; allow=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --allow-untrusted) allow=1; shift ;;
+            --no-chown) shift ;;
+            --destination) destination="$2"; shift 2 ;;
+            *) archive="$1"; shift ;;
+        esac
+    done
+    [ -n "$destination" ] && [ "$allow" = 1 ] && [ -s "$archive" ] || return 92
+    case "$destination" in "$TEST_ROOT/"*.package-extract.*/data) ;; *) return 93 ;; esac
+    mkdir -p "$destination/usr/bin"
+    if [ "${TEST_APK_FAIL:-0}" != 0 ]; then
+        echo 'ERROR: package integrity check failed' >&2
+        echo partial >"$destination/usr/bin/xray"
+        return "$TEST_APK_FAIL"
+    fi
+    [ "${TEST_APK_EMPTY:-0}" = 0 ] || return 0
+    cp "$TEST_ROOT/package-binary" "$destination/usr/bin/xray"
+}
+ensure_ca_certificates() { return 0; }
+ensure_fetch_tool() { return 0; }
+xray_cache_dir() { printf '%s' "$TEST_ROOT/flash"; }
+fetch_file() { echo "$1" >>"$TEST_ROOT/downloads"; cp "$TEST_ROOT/release.pkg" "$2"; }
+'''
+
+    def apk_fixture(self, binary=None):
+        # Same ADBd signature as the downloaded yichya APK v3, staged under the
+        # format-neutral xray.pkg name used by the actual bootstrap.
+        (self.directory / 'release.pkg').write_bytes(b'ADBd-test-package')
+        data = binary or self.make_binary('Xray 26.6.27 APK')
+        (self.directory / 'package-binary').write_bytes(data)
+        return data
+
+    def test_apk_bootstrap_selects_real_format_despite_pkg_staging_name(self):
+        data = self.apk_fixture()
+        result = self.raw_shell('install_xray_tmp', mocks=self.APK_EXTRACT_MOCK)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK: Xray installed', result.stdout)
+        self.assertEqual(self.binary.read_bytes(), data)
+        self.assertIn('/openwrt-xray-26.6.27-r1-aarch64_generic.apk',
+                      (self.directory / 'downloads').read_text())
+        self.assertTrue((self.directory / 'apk-calls').read_text().startswith('extract '))
+        self.assertTrue(list(self.store.glob('openwrt-xray-26.6.27-r1-aarch64_generic.apk.*.gz')))
+        self.assert_clean()
+
+    def test_apk_extract_failure_reports_real_reason_and_preserves_working_state(self):
+        good = self.apk_fixture()
+        cached = self.cache(good)
+        original_uci = (self.directory / 'uci').read_bytes()
+        result = self.raw_shell('install_xray_tmp', mocks=self.APK_EXTRACT_MOCK, TEST_APK_FAIL='13')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('apk extract (rc=13)', result.stderr)
+        self.assertIn('package integrity check failed', result.stderr)
+        self.assertNotIn('OK: Xray installed', result.stdout)
+        self.assertEqual(self.binary.read_bytes(), good)
+        self.assertEqual((self.directory / 'uci').read_bytes(), original_uci)
+        self.assertTrue(cached.exists())
+        self.assert_clean()
+
+    def test_apk_without_binary_fails_without_touching_working_core(self):
+        good = self.apk_fixture()
+        result = self.raw_shell('install_xray_tmp', mocks=self.APK_EXTRACT_MOCK, TEST_APK_EMPTY='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('usr/bin/xray', result.stderr)
+        self.assertNotIn('OK: Xray installed', result.stdout)
+        self.assertEqual(self.binary.read_bytes(), good)
+        self.assert_clean()
+
+    def test_apk_candidate_transport_is_validated_before_replacing_core(self):
+        bad = self.incompatible_binary()
+        good = self.make_binary('Xray 26.6.27 working')
+        self.apk_fixture(bad)
+        original_uci = (self.directory / 'uci').read_bytes()
+        result = self.raw_shell('install_xray_tmp', mocks=self.APK_EXTRACT_MOCK)
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('vless without TLS', result.stderr)
+        self.assertEqual(self.binary.read_bytes(), good)
+        self.assertEqual((self.directory / 'uci').read_bytes(), original_uci)
+        self.assert_clean()
+
     def cache(self, data=None):
         data = data or self.make_binary()
         self.store.mkdir(exist_ok=True)
@@ -116,6 +209,7 @@ opkg() {
         self.assertFalse(list(self.runtime.glob('.restore.*')))
         self.assertFalse(list(self.runtime.glob('.compat.*')))
         self.assertFalse((self.runtime / 'xray.pkg').exists())
+        self.assertFalse(list(self.runtime.glob('*.package-extract.*')))
 
     def test_compatible_mipsel_ipk_and_apk_asset_names(self):
         for fmt, expected in (

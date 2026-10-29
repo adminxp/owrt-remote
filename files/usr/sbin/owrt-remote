@@ -1837,7 +1837,9 @@ xray_package_extract_binary() (
 	trap cleanup_package_extract EXIT
 	trap 'exit 1' INT TERM
 	mkdir -p "$work/data" || return 1
-	case "$archive" in
+	# The bounded downloader stages every format as xray.pkg. Select the
+	# extractor from the release asset, not the temporary file's extension.
+	case "${3:-$archive}" in
 		*.ipk|*.pkg)
 			# yichya's .ipk release is a gzip-compressed tar containing
 			# data.tar.gz. Support both this format and classic ar-wrapped ipk.
@@ -1858,12 +1860,19 @@ xray_package_extract_binary() (
 			# /usr/bin/xray before our transport check has accepted the package.
 			;;
 		*.apk)
-			# apk packages are handled by apk itself on Alpine-based images.
-			if command -v apk >/dev/null 2>&1; then
-				apk add --allow-untrusted "$archive" >/dev/null 2>&1 || return 1
-				[ -x /usr/bin/xray ] || return 1
-				cp /usr/bin/xray "$output"
-				return $?
+			# OpenWrt 25 uses APK v3/ADB, not a gzip tarball. Extract offline
+			# into RAM; never install into /usr/bin or change the package DB.
+			command -v apk >/dev/null 2>&1 || { log 'Xray: для извлечения APK требуется apk extract'; return 1; }
+			if apk extract --allow-untrusted --no-chown --destination "$work/data" "$archive" >"$work/extract.log" 2>&1; then
+				if [ -s "$work/data/usr/bin/xray" ] && [ ! -L "$work/data/usr/bin/xray" ]; then
+					mv "$work/data/usr/bin/xray" "$output" || return 1
+					return 0
+				fi
+				log 'Xray: APK извлечён, но в пакете нет обычного файла usr/bin/xray'
+			else
+				rc=$?
+				log "Xray: ошибка apk extract (rc=$rc); системный Xray и база пакетов не изменены"
+				head -c 4096 "$work/extract.log" >&2
 			fi
 			;;
 	esac
@@ -1901,7 +1910,7 @@ install_xray_tmp_locked() (
 		return 1
 	}
 	mv -f "$package.new" "$package" || return 1
-	xray_package_extract_binary "$package" "$dir/xray.new" || {
+	xray_package_extract_binary "$package" "$dir/xray.new" "$asset" || {
 		log "Xray: не удалось извлечь /usr/bin/xray из пакета $asset; рабочий бинарник сохранён"
 		return 1
 	}

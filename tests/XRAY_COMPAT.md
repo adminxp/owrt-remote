@@ -117,3 +117,47 @@ JSON не заменяются. Проверяется SHA-256 реально з
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\k.zolotarev95\Documents\openwrt overlay\vps\deploy-xray-reverse-vps.ps1" -Vps "root@138.124.79.58" -Action Install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\k.zolotarev95\Documents\openwrt overlay\vps\deploy-xray-reverse-vps.ps1" -Vps "root@138.124.79.58" -Action Rollback
 ```
+
+## Установка APK на OpenWrt 25
+
+Пакет `openwrt-xray-26.6.27-r1-aarch64_generic.apk` имеет формат APK v3/ADB
+(`ADBd` в начале файла). Загрузчик сохраняет любой пакет как `xray.pkg`;
+прежний распаковщик выбирал IPK по этому временному имени. Даже при прямом
+вызове ветка APK использовала `apk add` и могла установить файлы в системный
+`/usr/bin`, не проверив новый бинарник заранее.
+
+Теперь исходное имя release asset передаётся распаковщику отдельным аргументом.
+Для APK выполняется `apk extract --allow-untrusted --no-chown --destination`
+в отдельный каталог RAM. Команда не устанавливает зависимости и не меняет
+базу пакетов. После извлечения проверяется обычный файл `usr/bin/xray`;
+проверки размера, запуска и совместимости транспорта остаются обязательными.
+Ошибки `apk extract` показывают код и ограниченный фрагмент настоящего вывода.
+Неполный кандидат и временный каталог удаляются; старый бинарник, UCI и кэш
+не заменяются при неудаче.
+
+В OpenWrt 25.12 используется apk-tools 3.0.5 с `minimal=true`; команда
+`extract` входит и в минимальную сборку. Источники:
+
+- https://github.com/openwrt/openwrt/blob/openwrt-25.12/package/system/apk/Makefile
+- https://github.com/alpinelinux/apk-tools/blob/v3.0.5/meson.build
+- https://github.com/alpinelinux/apk-tools/blob/v3.0.5/src/app_extract.c
+
+Локальная установка заменяет только агент и повторяет `prepare-xray`.
+Если первая установка прервалась до создания `/etc/owrt-remote/web.key`,
+после подготовки Xray создаётся случайный ключ входа. Имеющийся ключ сохраняется.
+Это завершает необходимый для открытия панели шаг прерванного `install.sh`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\k.zolotarev95\Documents\openwrt overlay\vps\deploy-xray-apk-fix.ps1" -Router "root@192.168.2.1" -Action Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\k.zolotarev95\Documents\openwrt overlay\vps\deploy-xray-apk-fix.ps1" -Router "root@192.168.2.1" -Action Rollback
+```
+
+Резервная копия агента: `/root/owrt-remote-backup-before-xray-apk-v119`.
+Откат возвращает агент, сохраняя подготовленный бинарник и boot-кэш.
+Рабочий JSON не пересобирается, туннель не перезапускается.
+
+Тесты проверяют полный bootstrap с форматом APK и временным именем `.pkg`,
+неудачное извлечение, отсутствие бинарника, несовместимого кандидата и IPK.
+В тестах shell работает настоящий BusyBox ash, вызов `apk` заменён тестовым
+обработчиком. Настоящий APK скачан и его формат проверен; запуск нативного
+`apk extract` на OpenWrt 25.12.5 требуется подтвердить установкой на устройстве.
