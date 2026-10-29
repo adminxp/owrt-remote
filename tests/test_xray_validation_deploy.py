@@ -11,6 +11,10 @@ from test_xray_mobile_deploy import SH, GIT_BIN, ROOT
 
 @unittest.skipUnless(SH, "POSIX shell required")
 class XrayValidationDeploymentTests(unittest.TestCase):
+    deploy_name = 'deploy-xray-validation-fix.ps1'
+    backup_name = 'owrt-remote-backup-before-xray-validation-v119'
+    success_marker = 'XRAY_VALIDATION_ROUTER_Install_OK'
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="xray-validation-deploy-")
         self.addCleanup(self.temp.cleanup)
@@ -23,9 +27,9 @@ class XrayValidationDeploymentTests(unittest.TestCase):
         self.env = dict(os.environ)
         if os.name == "nt":
             self.env["PATH"] = str(GIT_BIN) + os.pathsep + self.env["PATH"]
-        source = (ROOT / "vps/deploy-xray-validation-fix.ps1").read_text(encoding="utf-8")
+        source = (ROOT / 'vps' / self.deploy_name).read_text(encoding="utf-8")
         self.script = source.split("$RemoteScript = @'\n", 1)[1].split("\n'@", 1)[0]
-        self.script = self.script.replace("backup_dir=/root/owrt-remote-backup-before-xray-validation-v119",
+        self.script = self.script.replace('backup_dir=/root/' + self.backup_name,
                                           "backup_dir=" + shlex.quote(self.backup.as_posix()))
         self.script = self.script.replace("printf /www/cgi-bin/owrt-remote", "printf %s " + shlex.quote(self.targets["cgi"].as_posix()))
         self.script = self.script.replace("printf /usr/sbin/owrt-remote", "printf %s " + shlex.quote(self.targets["agent"].as_posix()))
@@ -52,7 +56,7 @@ class XrayValidationDeploymentTests(unittest.TestCase):
         for attempt in range(2):
             result = self.deploy("Install")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("XRAY_VALIDATION_ROUTER_Install_OK", result.stdout)
+            self.assertIn(self.success_marker, result.stdout)
             for item, path in self.targets.items():
                 self.assertNotEqual(path.read_bytes(), self.original[item])
                 self.assertEqual(self.backup.joinpath(item).read_bytes(), self.original[item])

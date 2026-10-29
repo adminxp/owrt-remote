@@ -79,6 +79,10 @@ printf 'Configuration OK.\n'
         config = json.loads(self.target.read_text())
         self.assertEqual(config["outbounds"][2]["settings"]["port"], 8443)
         self.assertEqual(config["outbounds"][0]["settings"]["redirect"], "127.0.0.1:80")
+        self.assertEqual(config["outbounds"][0]["settings"]["finalRules"],
+                         [{"action": "allow", "network": "tcp", "port": 80}])
+        self.assertEqual(config["outbounds"][1]["settings"]["finalRules"],
+                         [{"action": "allow", "network": "tcp", "port": 22}])
         self.assertEqual(config["outbounds"][2]["settings"]["reverse"]["tag"], "main:admin")
         self.assert_no_candidate()
         if os.name != "nt":
@@ -189,6 +193,27 @@ done
         self.assertEqual(self.target.read_bytes(), working)
         self.assert_no_candidate()
 
+    @unittest.skipUnless(os.environ.get('OWRT_TEST_XRAY_BIN') and os.environ.get('OWRT_TEST_NEW_XRAY_BIN'),
+                         'Set compatible and incompatible real Xray binaries')
+    def test_real_generated_public_reverse_config_matches_the_reported_failure(self):
+        old = Path(os.environ['OWRT_TEST_XRAY_BIN']).as_posix()
+        new = Path(os.environ['OWRT_TEST_NEW_XRAY_BIN']).as_posix()
+        for address in ('example.com', '8.8.8.8'):
+            self.prepare(vps_host=address, xray_bin=old)
+            result = self.run_shell('render_client_config')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            working = self.target.read_bytes()
+            # Deliberately skip migration once to reproduce the exact rc=23
+            # with a new core against the very same generated configuration.
+            self.config(vps_host=address, vless_uuid=ADMIN_UUID, ssh_vless_uuid=SSH_UUID,
+                        reverse_tag='main:admin', ssh_reverse_tag='main:ssh',
+                        xray_bin=new, xray_config=self.target.as_posix())
+            result = self.run_shell('ensure_xray_available() { return 0; }; render_client_config')
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertIn('vless without TLS', result.stderr)
+            self.assertEqual(self.target.read_bytes(), working)
+            self.assert_no_candidate()
+
     def test_hub_client_and_server_payload_agree_on_uuids_ports_and_routes(self):
         row = dict(id="test-router", name="test", role="node", vps_host="hub.example", vless_port=8443,
                    vless_uuid=ADMIN_UUID, ssh_vless_uuid=SSH_UUID, reverse_tag="main:admin", ssh_reverse_tag="main:ssh",
@@ -201,6 +226,10 @@ done
         result = self.run_shell("render_client_config --stdout")
         self.assertEqual(result.returncode, 0, result.stderr)
         client = json.loads(result.stdout)
+        hub_client = shell_tests.hub.make_router_xray_config(row)
+        for index in (0, 1):
+            self.assertEqual(client["outbounds"][index]["settings"],
+                             hub_client["outbounds"][index]["settings"])
         server = shell_tests.hub.make_server_xray_config([row], listen_port=8443)
         inbound = server["inbounds"][0]
         self.assertEqual(inbound["port"], client["outbounds"][2]["settings"]["port"])

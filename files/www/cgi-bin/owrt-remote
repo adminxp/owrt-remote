@@ -375,15 +375,25 @@ run_action() {
 			;;
 		install_xray_tmp)
 			if "$AGENT" install-xray-tmp >"$output" 2>&1; then
-				"$AGENT" render-client >>"$output" 2>&1 || rc=$?
-				/etc/init.d/owrt-remote restart >>"$output" 2>&1 || rc=$?
+				if "$AGENT" render-client >>"$output" 2>&1; then
+					if /etc/init.d/owrt-remote restart >>"$output" 2>&1; then
+						set_result "Xray установлен, конфигурация проверена" "$(cat "$output")" "ok"
+					else
+						rc=$?
+						set_result "Ошибка перезапуска Xray" "$(cat "$output")" "bad"
+					fi
+				else
+					rc=$?
+					printf '\nrc=%s\nРабочий JSON сохранён. Перезапуск сервиса не выполнен.\n' "$rc" >>"$output"
+					set_result "Xray скачан, но конфигурация не прошла проверку" "$(cat "$output")" "bad"
+				fi
 			else
 				rc=$?
+				set_result "Ошибка установки Xray" "$(cat "$output")" "bad"
 			fi
-			set_result "Xray установлен в /tmp" "$(cat "$output")" "ok"
 			;;
 	esac
-	if [ "$rc" != "0" ]; then
+	if [ "$rc" != "0" ] && [ "$RESULT_KIND" != bad ]; then
 		set_result "$RESULT_TITLE" "$(cat "$output")" "bad"
 	fi
 	# Deliver the completed stop result without keeping a mobile HTTP request open.

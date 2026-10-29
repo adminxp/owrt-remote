@@ -6,9 +6,11 @@ CONFIG="owrtremote"
 SECTION="main"
 # OpenWrt packages are published by yichya for the architectures reported by
 # opkg/apk. Keep the version explicit so a release cannot change underneath a
-# running router; it can be overridden for a controlled test or rollback.
+# running router. 26.6.27 is the last release compatible with the existing
+# unencrypted VLESS reverse transport; 26.7.11+ rejects public destinations.
+# Changing the package source alone does not change that protocol requirement.
 XRAY_RELEASE_REPO="${XRAY_RELEASE_REPO:-https://github.com/yichya/openwrt-xray}"
-XRAY_RELEASE_VERSION="${XRAY_RELEASE_VERSION:-26.10.21}"
+XRAY_RELEASE_VERSION="${XRAY_RELEASE_VERSION:-26.6.27}"
 XRAY_RELEASE_REVISION="${XRAY_RELEASE_REVISION:-1}"
 XRAY_RELEASE_BASE_URL="${XRAY_RELEASE_BASE_URL:-$XRAY_RELEASE_REPO/releases/download/v$XRAY_RELEASE_VERSION}"
 
@@ -473,13 +475,28 @@ xray_package_format() {
 }
 
 xray_release_asset() {
-	local version arch
+	local version arch package_arch
 	version="${XRAY_RELEASE_VERSION#v}"
 	arch="$(xray_arch)" || return 1
 	[ -n "$arch" ] || return 1
 	case "$(xray_package_format)" in
 		apk) printf 'openwrt-xray-%s-r%s-%s.apk\n' "$version" "$XRAY_RELEASE_REVISION" "$arch" ;;
-		*) printf 'openwrt-xray_%s-%s_%s.ipk\n' "$version" "$XRAY_RELEASE_REVISION" "$arch" ;;
+		*)
+			# These yichya releases include both package and target architecture
+			# in the IPK filename. APK filenames do not use this extra suffix.
+			case "$version" in
+				26.6.1|26.6.22|26.6.27)
+					package_arch="$arch"
+					case "$arch" in
+						i386_pentium) package_arch=i386_pentium-mmx ;;
+						arm_cortex-a5-vfpv4) package_arch=arm_cortex-a5_vfpv4 ;;
+						arm_cortex-a5_vfpv4) arch=arm_cortex-a5-vfpv4 ;;
+					esac
+					printf 'openwrt-xray_%s-%s_%s-%s.ipk\n' "$version" "$XRAY_RELEASE_REVISION" "$package_arch" "$arch"
+					;;
+				*) printf 'openwrt-xray_%s-%s_%s.ipk\n' "$version" "$XRAY_RELEASE_REVISION" "$arch" ;;
+			esac
+			;;
 	esac
 }
 
@@ -580,6 +597,40 @@ validate_xray_config() {
 	fi
 }
 
+xray_requires_legacy_replacement() {
+	local version
+	# Keep an existing working core. Replace a known incompatible core only
+	# for the transport generated here (VLESS encryption=none, security=none).
+	[ "$(uci_get vless_encryption none)" = none ] || return 1
+	version="$("$1" version 2>/dev/null | sed -n '1s/^Xray \([0-9][0-9.]*\) .*/\1/p')"
+	[ -n "$version" ] || return 1
+	LC_ALL=C awk -v version="$version" 'BEGIN {
+		n=split(version, v, ".")
+		exit !(n==3 && (v[1]*10000 + v[2]*100 + v[3]) >= 260711)
+	}'
+}
+
+xray_validate_transport_binary() (
+	# Validate actual protocol support, not just `xray version`. This probe
+	# contains no router credentials, does not connect and does not alter UCI.
+	binary="$1"
+	probe="$(mktemp -d "$(xray_runtime_dir)/.compat.XXXXXX")" || return 1
+	trap 'rm -rf "$probe"' EXIT
+	trap 'exit 1' INT TERM
+	umask 077
+	cat >"$probe/config.json" <<'EOF'
+{"log":{"loglevel":"none"},"outbounds":[{"tag":"vps-interconn","protocol":"vless","settings":{"address":"example.com","port":8443,"id":"11111111-1111-4111-8111-111111111111","encryption":"none","reverse":{"tag":"compat-reverse"}},"streamSettings":{"network":"tcp","security":"none"}}]}
+EOF
+	if "$binary" -test -config "$probe/config.json" >"$probe/result" 2>&1; then
+		return 0
+	else
+		rc=$?
+		head -c 8192 "$probe/result" >&2
+		log "ОШИБКА: пакет Xray несовместим с текущим VLESS reverse без TLS (rc=$rc). Нужна совместимая сборка $XRAY_RELEASE_VERSION; рабочий бинарник и кэш сохранены"
+		return "$rc"
+	fi
+)
+
 render_client_config() (
 	local temp_dir rc xray_host out stdout router_id vps_host vps_port uuid ssh_uuid encryption flow reverse_tag ssh_reverse_tag admin_host admin_port ssh_host ssh_port xray_config xray_config_dir
 	temp_dir=""
@@ -643,6 +694,8 @@ render_client_config() (
 	# Xray detects JSON by extension; keep the candidate private and on the
 	# same filesystem as the destination so the final rename is atomic.
 	out="$temp_dir/config.json"
+	# Freedom denies VLESS reverse by default in newer cores. Each redirect
+	# fixes its destination before finalRules; allow only that service's TCP port.
 	cat >"$out" <<EOF
 {
   "log": {
@@ -656,14 +709,16 @@ render_client_config() (
       "tag": "router-admin",
       "protocol": "freedom",
       "settings": {
-        "redirect": "$(json_escape "$admin_host"):$admin_port"
+        "redirect": "$(json_escape "$admin_host"):$admin_port",
+        "finalRules": [{"action": "allow", "network": "tcp", "port": $admin_port}]
       }
     },
     {
       "tag": "router-ssh",
       "protocol": "freedom",
       "settings": {
-        "redirect": "$(json_escape "$ssh_host"):$ssh_port"
+        "redirect": "$(json_escape "$ssh_host"):$ssh_port",
+        "finalRules": [{"action": "allow", "network": "tcp", "port": $ssh_port}]
       }
     },
     {
@@ -1583,6 +1638,7 @@ xray_cache_save() (
 	bin="$1"
 	[ -s "$bin" ] && [ -x "$bin" ] || return 1
 	"$bin" version >/dev/null 2>&1 || return 1
+	xray_requires_legacy_replacement "$bin" && return 1
 	store="$(xray_cache_dir)" || { log 'Xray: постоянный кэш недоступен; после перезагрузки потребуется загрузка из сети'; return 1; }
 	asset="$(xray_release_asset)" || return 1
 	digest="$(xray_digest "$bin")" || return 1
@@ -1635,6 +1691,7 @@ xray_cache_restore() (
 		size="$(wc -c <"$temp")"
 		[ "$size" -le 67108864 ] && [ "$(xray_digest "$temp")" = "$digest" ] || continue
 		chmod 755 "$temp" && "$temp" version >/dev/null 2>&1 || continue
+		xray_validate_transport_binary "$temp" || continue
 		mv -f "$temp" "$dir/xray" || return 1
 		if [ "$(uci_get xray_bin '')" != "$dir/xray" ]; then
 			uci set "$CONFIG.$SECTION.xray_bin=$dir/xray" && uci commit "$CONFIG" || return 1
@@ -1794,18 +1851,11 @@ xray_package_extract_binary() (
 			if [ -s "$work/data.tar.gz" ] &&
 				(cd "$work/data" && cat "$work/data.tar.gz" | tar -xzf - ./usr/bin/xray) >/dev/null 2>&1 &&
 				[ -s "$work/data/usr/bin/xray" ]; then
-				cp "$work/data/usr/bin/xray" "$output" || return 1
+				mv "$work/data/usr/bin/xray" "$output" || return 1
 				return 0
 			fi
-			# A minimal image may not include ar/tar extraction helpers. opkg
-			# remains a safe last resort; the candidate is still validated before
-			# the configured RAM binary is replaced.
-			if command -v opkg >/dev/null 2>&1; then
-				opkg install "$archive" >/dev/null 2>&1 || return 1
-				[ -x /usr/bin/xray ] || return 1
-				cp /usr/bin/xray "$output"
-				return $?
-			fi
+			# Never fall back to `opkg install`: it could overwrite an active
+			# /usr/bin/xray before our transport check has accepted the package.
 			;;
 		*.apk)
 			# apk packages are handled by apk itself on Alpine-based images.
@@ -1833,7 +1883,7 @@ install_xray_tmp_locked() (
 	# An interrupted package download is disposable; the working binary and
 	# compressed boot copy are never removed before a candidate is validated.
 	rm -f "$package.new" "$dir/xray.new"
-	trap 'rm -f "$package.new" "$dir/xray.new"' EXIT
+	trap 'rm -f "$package.new" "$package" "$dir/xray.new"' EXIT
 	trap 'exit 1' INT TERM
 	ensure_ca_certificates || log "CA certificates not found, trying download anyway"
 	ensure_fetch_tool || {
@@ -1866,6 +1916,7 @@ install_xray_tmp_locked() (
 		return 1
 	}
 	version="$(printf '%s\n' "$version" | sed -n '1p')"
+	xray_validate_transport_binary "$dir/xray.new" || return $?
 	mv -f "$dir/xray.new" "$dir/xray" || return 1
 	uci set "$CONFIG.$SECTION.xray_bin=$dir/xray" && uci commit "$CONFIG" || return 1
 	xray_cache_save "$dir/xray" || true
@@ -1879,11 +1930,12 @@ ensure_xray_available() {
 	local configured candidate found
 	configured="$(uci_get xray_bin /usr/bin/xray)"
 	if [ -x "$configured" ]; then
-		return 0
+		if ! xray_requires_legacy_replacement "$configured"; then return 0; fi
+		log "Xray: установленная версия запрещает текущий VLESS без TLS; подготовка совместимой $XRAY_RELEASE_VERSION из yichya/openwrt-xray"
 	fi
 
 	for candidate in /usr/bin/xray /usr/bin/xray-core /usr/local/bin/xray /opt/bin/xray /tmp/owrt-xray/xray /tmp/owrt-xray/xray_softfloat /tmp/xray /tmp/xray_softfloat; do
-		if [ -x "$candidate" ]; then
+		if [ -x "$candidate" ] && ! xray_requires_legacy_replacement "$candidate"; then
 			found="$candidate"
 			break
 		fi
@@ -1893,7 +1945,7 @@ ensure_xray_available() {
 		found="$(command -v xray 2>/dev/null || command -v xray-core 2>/dev/null || true)"
 	fi
 
-	if [ -n "$found" ] && [ -x "$found" ]; then
+	if [ -n "$found" ] && [ -x "$found" ] && ! xray_requires_legacy_replacement "$found"; then
 		[ "$found" = "$configured" ] || {
 			uci set "$CONFIG.$SECTION.xray_bin=$found"
 			uci commit "$CONFIG"
@@ -1910,7 +1962,7 @@ prepare_xray_tmp() (
 	trap 'exit 1' INT TERM
 	# Recheck after acquiring the lock: a concurrent installer may have finished.
 	configured="$(uci_get xray_bin /usr/bin/xray)"
-	[ ! -x "$configured" ] || return 0
+	if [ -x "$configured" ] && ! xray_requires_legacy_replacement "$configured"; then return 0; fi
 	xray_cache_restore && return 0
 	log 'Xray: загрузочной копии нет; требуется загрузка из сети'
 	install_xray_tmp_locked

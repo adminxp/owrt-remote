@@ -88,6 +88,52 @@ render_page() { printf 'KIND=%s\nTITLE=%s\nBODY=%s\nDRAFT=%s\n' "$RESULT_KIND" "
         self.assertFalse(leftovers, "CGI temporary files must be removed")
         return result.stdout.decode("utf-8")
 
+    def install_action(self, install_rc=0, render_rc=0, service_rc=0):
+        agent = self.directory / 'bin' / 'install-agent'
+        agent.write_text('''#!/bin/sh
+printf '%s\\n' "$1" >>"$TEST_ROOT/install-calls"
+case "$1" in
+ install-xray-tmp) exit INSTALL_RC ;;
+ render-client) echo 'Xray config validation'; exit RENDER_RC ;;
+esac
+'''.replace('INSTALL_RC', str(install_rc)).replace('RENDER_RC', str(render_rc)),
+            encoding='utf-8', newline='\n')
+        agent.chmod(0o755)
+        self.env['AGENT'] = agent.as_posix()
+        source = self.cgi.read_text(encoding='utf-8')
+        source = source.replace('/etc/init.d/owrt-remote', 'test_service')
+        source = source.replace('\nrun_action() {',
+            '\ntest_service() { echo "$1" >>"$TEST_ROOT/restarts"; return ' + str(service_rc) + '; }\nrun_action() {')
+        self.cgi.write_text(source, encoding='utf-8', newline='\n')
+        return self.post('', action='install_xray_tmp')
+
+    def test_install_does_not_restart_or_claim_success_on_invalid_config(self):
+        response = self.install_action(render_rc=23)
+        self.assertIn('KIND=bad', response)
+        self.assertIn('Xray скачан, но конфигурация не прошла проверку', response)
+        self.assertIn('rc=23', response)
+        self.assertNotIn('TITLE=Xray установлен', response)
+        self.assertFalse((self.directory / 'restarts').exists())
+
+    def test_failed_install_does_not_render_or_restart(self):
+        response = self.install_action(install_rc=23)
+        self.assertIn('KIND=bad', response)
+        self.assertIn('TITLE=Ошибка установки Xray', response)
+        self.assertEqual((self.directory / 'install-calls').read_text(), 'install-xray-tmp\n')
+        self.assertFalse((self.directory / 'restarts').exists())
+
+    def test_valid_install_restarts_once_and_reports_success(self):
+        response = self.install_action()
+        self.assertIn('KIND=ok', response)
+        self.assertIn('TITLE=Xray установлен, конфигурация проверена', response)
+        self.assertEqual((self.directory / 'install-calls').read_text(), 'install-xray-tmp\nrender-client\n')
+        self.assertEqual((self.directory / 'restarts').read_text(), 'restart\n')
+
+    def test_restart_failure_is_reported_separately(self):
+        response = self.install_action(service_rc=1)
+        self.assertIn('KIND=bad', response)
+        self.assertIn('TITLE=Ошибка перезапуска Xray', response)
+
     def test_mobile_smart_quotes_reproduce_uci_255_and_are_repaired(self):
         script = 'uci set owrtremote.main.router_name=‘Дом у моря’\nuci commit owrtremote\n'
         # UCI returns 255 for too many arguments; shell syntax validation alone

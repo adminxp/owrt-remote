@@ -4488,6 +4488,9 @@ def make_router_xray_config(row):
                 "protocol": "freedom",
                 "settings": {
                     "redirect": f"{row['admin_host']}:{int(row['admin_port'])}",
+                    # VLESS reverse is denied by Freedom's default final rule.
+                    # Redirect fixes the destination; allow only its TCP port.
+                    "finalRules": [{"action": "allow", "network": "tcp", "port": int(row["admin_port"])}],
                 },
             },
             {
@@ -4495,6 +4498,7 @@ def make_router_xray_config(row):
                 "protocol": "freedom",
                 "settings": {
                     "redirect": f"{row['ssh_host'] or '127.0.0.1'}:{int(row['ssh_port'] or 22)}",
+                    "finalRules": [{"action": "allow", "network": "tcp", "port": int(row["ssh_port"] or 22)}],
                 },
             },
             {

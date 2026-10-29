@@ -29,7 +29,7 @@ class XrayBootstrapTests(unittest.TestCase):
         self.env['PATH'] = str(Path(base.SH).parent) + os.pathsep + os.environ['PATH']
         self.mocks = r'''
 xray_cache_dir() { printf '%s' "$TEST_ROOT/flash"; }
-xray_release_asset() { printf openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk; }
+xray_release_asset() { printf openwrt-xray_26.6.27-1_aarch64_cortex-a53-aarch64_cortex-a53.ipk; }
 xray_arch() { printf aarch64; }
 xray_package_extract_binary() { cp "$TEST_ROOT/release.pkg" "$2"; }
 ensure_ca_certificates() { return 0; }
@@ -82,7 +82,7 @@ opkg() {
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip().splitlines()[-1],
-                         'openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk')
+                         'openwrt-xray_26.6.27-1_aarch64_cortex-a53-aarch64_cortex-a53.ipk')
 
     def test_yichya_ipk_extracts_only_usr_bin_xray(self):
         binary = self.make_binary('package')
@@ -106,7 +106,7 @@ opkg() {
     def cache(self, data=None):
         data = data or self.make_binary()
         self.store.mkdir(exist_ok=True)
-        path = self.store / ('openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk.' + hashlib.sha256(data).hexdigest() + '.gz')
+        path = self.store / ('openwrt-xray_26.6.27-1_aarch64_cortex-a53-aarch64_cortex-a53.ipk.' + hashlib.sha256(data).hexdigest() + '.gz')
         path.write_bytes(gzip.compress(data))
         return path
 
@@ -114,6 +114,92 @@ opkg() {
         self.assertFalse((self.runtime / 'bootstrap-lock').exists())
         self.assertFalse(list(self.runtime.glob('*.new')))
         self.assertFalse(list(self.runtime.glob('.restore.*')))
+        self.assertFalse(list(self.runtime.glob('.compat.*')))
+        self.assertFalse((self.runtime / 'xray.pkg').exists())
+
+    def test_compatible_mipsel_ipk_and_apk_asset_names(self):
+        for fmt, expected in (
+            ('ipk', 'openwrt-xray_26.6.27-1_mipsel_24kc-mipsel_24kc.ipk'),
+            ('apk', 'openwrt-xray-26.6.27-r1-mipsel_24kc.apk'),
+        ):
+            result = self.raw_shell('xray_release_asset', mocks=
+                f'xray_arch() {{ printf mipsel_24kc; }}; xray_package_format() {{ printf {fmt}; }}')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), expected)
+
+    def incompatible_binary(self):
+        data = b'''#!/bin/sh
+if [ "$1" = version ]; then echo 'Xray 26.10.21 (Xray, Penetrates Everything.) Custom'; exit 0; fi
+echo 'vless without TLS or other encryption is prohibited unless the server address is a private IP or domain' >&2
+exit 23
+'''
+        self.binary.write_bytes(data)
+        self.binary.chmod(0o755)
+        return data
+
+    def test_new_core_rejected_before_binary_cache_and_uci_replacement(self):
+        bad = self.incompatible_binary()
+        good = self.make_binary('Xray 26.6.27 compatible')
+        cached = self.cache(good)
+        (self.directory / 'release.pkg').write_bytes(bad)
+        original_uci = (self.directory / 'uci').read_bytes()
+        result = self.shell('install_xray_tmp', mocks='fetch_file() { cp "$TEST_ROOT/release.pkg" "$2"; }')
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('vless without TLS', result.stderr)
+        self.assertEqual(self.binary.read_bytes(), good)
+        self.assertEqual((self.directory / 'uci').read_bytes(), original_uci)
+        self.assertTrue(cached.exists())
+        self.assertNotIn('OK: Xray installed', result.stdout)
+        self.assert_clean()
+
+    def test_existing_incompatible_core_is_replaced_once(self):
+        good = self.make_binary('Xray 26.6.27 compatible')
+        self.incompatible_binary()
+        (self.directory / 'release.pkg').write_bytes(good)
+        result = self.shell('ensure_xray_available; ensure_xray_available', mocks=r'''
+fetch_file() { echo download >>"$TEST_ROOT/downloads"; cp "$TEST_ROOT/release.pkg" "$2"; }
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.binary.read_bytes(), good)
+        self.assertEqual((self.directory / 'downloads').read_text().splitlines(), ['download'])
+        self.assert_clean()
+
+    def test_incompatible_core_can_recover_from_verified_compatible_cache_offline(self):
+        good = self.make_binary('Xray 26.6.27 compatible')
+        self.cache(good)
+        self.incompatible_binary()
+        result = self.shell('ensure_xray_available', mocks='fetch_file() { echo forbidden-network >&2; return 99; }')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.binary.read_bytes(), good)
+        self.assert_clean()
+
+    def test_failed_compatibility_recovery_keeps_original_binary(self):
+        bad = self.incompatible_binary()
+        result = self.shell('ensure_xray_available', mocks='fetch_file() { return 28; }')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.binary.read_bytes(), bad)
+        self.assert_clean()
+
+    def test_incompatible_core_is_not_saved_under_compatible_cache_name(self):
+        self.incompatible_binary()
+        result = self.shell('xray_cache_save "$OWRT_REMOTE_XRAY_RUNTIME/xray"')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(list(self.store.glob('*.gz')))
+
+    @unittest.skipUnless(os.environ.get('OWRT_TEST_XRAY_BIN'), 'Set real compatible Xray')
+    def test_real_compatible_core_passes_transport_probe(self):
+        result = self.shell('xray_validate_transport_binary "$TEST_CORE"',
+                            TEST_CORE=Path(os.environ['OWRT_TEST_XRAY_BIN']).as_posix())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_clean()
+
+    @unittest.skipUnless(os.environ.get('OWRT_TEST_NEW_XRAY_BIN'), 'Set real incompatible Xray')
+    def test_real_modern_core_reproduces_public_vless_rejection(self):
+        result = self.shell('xray_validate_transport_binary "$TEST_CORE"',
+                            TEST_CORE=Path(os.environ['OWRT_TEST_NEW_XRAY_BIN']).as_posix())
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn('vless without TLS', result.stderr)
+        self.assert_clean()
 
     def test_reboot_restores_verified_cache_without_network_or_flash_rewrite(self):
         data = self.make_binary()
@@ -290,7 +376,7 @@ curl() {
 
     def test_each_download_redirect_uses_wan_dns_and_keeps_tls_verification(self):
         self.config(wan_direct='1')
-        result = self.shell('fetch_file https://github.com/yichya/openwrt-xray/releases/download/v26.10.21/openwrt-xray_26.10.21-1_aarch64_cortex-a53.ipk "$TEST_ROOT/download"',
+        result = self.shell('fetch_file https://github.com/yichya/openwrt-xray/releases/download/v26.6.27/openwrt-xray_26.6.27-1_aarch64_cortex-a53-aarch64_cortex-a53.ipk "$TEST_ROOT/download"',
                             mocks=self.CURL_MOCK, http_proxy='', https_proxy='')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.directory / 'resolved').read_text().splitlines(),
